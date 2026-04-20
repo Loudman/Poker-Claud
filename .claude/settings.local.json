@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm init:*)",
+      "Bash(npm install:*)",
+      "Bash(npx tailwindcss:*)",
+      "Bash(./node_modules/.bin/tailwindcss init:*)",
+      "Bash(npm run:*)",
+      "Bash(./node_modules/.bin/electron .)",
+      "Bash(pkill -f \"electron .\")",
+      "Bash(npm start:*)",
+      "Bash(echo \"PID: $!\")",
+      "Bash(pkill -f \"electron\")",
+      "Bash(pkill -f electron)",
+      "Bash(pkill -f \"poker1\")",
+      "Bash(identify /Users/rfigueiredo/code/tests/electron/poker1/src/renderer/assets/PokerRoom.png)",
+      "Bash(sips -g pixelWidth -g pixelHeight /Users/rfigueiredo/code/tests/electron/poker1/src/renderer/assets/PokerRoom.png)",
+      "Bash(npx tsc *)",
+      "Read(//private/tmp/**)",
+      "Bash(pkill -f \"electron.*poker1\")",
+      "Bash(pkill -f \"npm.*poker1\")"
+    ]
+  }
+}

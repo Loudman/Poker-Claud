@@ -18,7 +18,11 @@
       "Bash(npx tsc *)",
       "Read(//private/tmp/**)",
       "Bash(pkill -f \"electron.*poker1\")",
-      "Bash(pkill -f \"npm.*poker1\")"
+      "Bash(pkill -f \"npm.*poker1\")",
+      "Read(//Users/rfigueiredo/Desktop/**)",
+      "Read(//Users/rfigueiredo/Downloads/**)",
+      "Bash(cp \"/Users/rfigueiredo/Desktop/Screenshot 2026-04-20 at 21.39.50.png\" /Users/rfigueiredo/code/tests/electron/poker1/screenshots/gameplay.png)",
+      "Bash(cp \"/Users/rfigueiredo/Desktop/Screenshot 2026-04-20 at 21.40.17.png\" /Users/rfigueiredo/code/tests/electron/poker1/screenshots/poker-teacher.png)"
     ]
   }
 }

@@ -1,6 +1,22 @@
 # Texas Hold'em Poker — Gran Masters Edition
 
+> **GOD MODE EDITION — Becoming a Gran Master**
+
 A fully-featured Texas Hold'em poker simulator built with **Electron**, **TypeScript**, and **TailwindCSS v4**. Designed as a single-page, offline desktop game with a fixed-canvas layout, multi-archetype AI opponents, real-time equity calculation, rich visual/audio feedback, XP progression, daily challenges, persistent save state, and a post-hand **Poker Teacher** analysis panel.
+
+---
+
+## Screenshots
+
+### Gameplay — Action Panel
+![Gameplay screenshot showing action panel with pot odds, equity display, and betting controls](screenshots/gameplay.png)
+
+*Pre-flop action with A♣ Q♦. The bottom HUD shows pot odds (need 17%, you have 47% ✓), quick bet-size presets, and the 30-second time bank. Player badges show VPIP/PFR stats and position labels. The chip-leader crown (👑) marks the current stack leader.*
+
+### Post-Hand — Poker Teacher Panel
+![Post-hand analysis showing the Poker Teacher panel with a "Good fold" note](screenshots/poker-teacher.png)
+
+*After folding on the flop, the 🎓 Poker Teacher panel appears above the "New Hand" button. It confirms the fold was correct (+EV), shows the user's hole cards in the header, and explains the reasoning. The community cards and winner announcement remain visible.*
 
 ---
 

@@ -954,9 +954,15 @@ function drainSpeechQueue(): void {
   const text = _speechQueue.shift()!;
   _speechBusy = true;
   const utt = new SpeechSynthesisUtterance(text);
+  utt.lang   = 'en-US';
   utt.rate   = 1.15;
   utt.pitch  = 1.0;
   utt.volume = Math.min(1, masterVolume);
+  // Prefer an English voice regardless of the system language
+  const voices = window.speechSynthesis.getVoices();
+  const enVoice = voices.find(v => v.lang.startsWith('en-') && v.localService)
+                ?? voices.find(v => v.lang.startsWith('en-'));
+  if (enVoice) utt.voice = enVoice;
   utt.onend  = () => { _speechBusy = false; drainSpeechQueue(); };
   utt.onerror = () => { _speechBusy = false; drainSpeechQueue(); };
   window.speechSynthesis.speak(utt);

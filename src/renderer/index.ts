@@ -955,13 +955,20 @@ function drainSpeechQueue(): void {
   _speechBusy = true;
   const utt = new SpeechSynthesisUtterance(text);
   utt.lang   = 'en-US';
-  utt.rate   = 1.15;
+  utt.rate   = 1.0;
   utt.pitch  = 1.0;
   utt.volume = Math.min(1, masterVolume);
-  // Prefer an English voice regardless of the system language
+  // Prefer a natural-sounding English voice regardless of system language.
+  // Priority: known high-quality names → any en-US → any en-*.
   const voices = window.speechSynthesis.getVoices();
-  const enVoice = voices.find(v => v.lang.startsWith('en-') && v.localService)
-                ?? voices.find(v => v.lang.startsWith('en-'));
+  const PREFERRED = ['Samantha', 'Alex', 'Daniel', 'Karen', 'Moira',
+                     'Google US English', 'Google UK English Female',
+                     'Microsoft Zira', 'Microsoft David', 'Microsoft Mark'];
+  const enVoice =
+    voices.find(v => PREFERRED.some(n => v.name.includes(n))) ??
+    voices.find(v => v.lang === 'en-US') ??
+    voices.find(v => v.lang === 'en-GB') ??
+    voices.find(v => v.lang.startsWith('en-'));
   if (enVoice) utt.voice = enVoice;
   utt.onend  = () => { _speechBusy = false; drainSpeechQueue(); };
   utt.onerror = () => { _speechBusy = false; drainSpeechQueue(); };

@@ -8,7 +8,38 @@
     "build:preload": "webpack --config webpack.preload.js",
     "build:renderer": "webpack --config webpack.renderer.js",
     "build": "npm run build:main && npm run build:preload && npm run build:renderer",
-    "start": "npm run build && electron ."
+    "start": "npm run build && electron .",
+    "dist": "npm run build && electron-builder --mac --win",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:win": "npm run build && electron-builder --win"
+  },
+  "build": {
+    "appId": "com.poker1.app",
+    "productName": "Poker",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "target": [
+        { "target": "dmg", "arch": ["x64", "arm64"] },
+        { "target": "zip", "arch": ["x64", "arm64"] }
+      ],
+      "category": "public.app-category.card-games"
+    },
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
   },
   "keywords": [],
   "author": "",
@@ -20,6 +51,7 @@
     "copy-webpack-plugin": "^14.0.0",
     "css-loader": "^7.1.4",
     "electron": "^41.2.0",
+    "electron-builder": "^26.8.1",
     "html-webpack-plugin": "^5.6.6",
     "postcss": "^8.5.9",
     "postcss-loader": "^8.2.1",

@@ -746,15 +746,15 @@ function playChipsStack(): void {
   noise(0, 0.06, 0.20, 2000, 6);
 }
 
-/** Card fold — random card-shove variant */
+/** Card fold — synthesis only */
 function playCardFold(): void {
-  if (tryBufPick(_range('card-shove', 4), 0.72)) return;
   noise(0, 0.030, 0.18, 3500, 2, 'highpass');
 }
 
-/** Rapid card shuffle before dealing */
+/** Rapid card shuffle before dealing — uses card-fan-1 or card-fan-2 randomly */
 function playShuffleSound(): void {
-  if (tryBuf('card-shuffle', 0.9)) return;
+  if (tryBufPick(_range('card-fan', 2), 0.9)) return;
+  // Synthesis fallback
   for (let i = 0; i < 11; i++) {
     const t   = i * 0.052;
     const fHz = 3000 + Math.random() * 4000;

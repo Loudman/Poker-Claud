@@ -2662,19 +2662,34 @@ function render(): void {
   subtitleEl.textContent = 'GOD MODE EDITION - Becoming a Gran Master';
   canvas.appendChild(subtitleEl);
 
-  // New Game button (showdown only)
-  if (state.phase === 'showdown') {
-    const newGameTopBtn = document.createElement('button');
-    newGameTopBtn.textContent = 'New Game  ↺';
-    newGameTopBtn.style.cssText = [
-      'position:absolute;top:52px;left:16px;z-index:100;',
-      'background:linear-gradient(135deg,#1e3a5f,#2563eb);border:1px solid #1e40af;',
-      'color:white;border-radius:6px;padding:4px 10px;',
-      'font-size:11px;font-weight:600;cursor:pointer;letter-spacing:0.5px;',
-      'transition:filter 0.15s;',
-    ].join('');
-    newGameTopBtn.addEventListener('click', newGame);
-    canvas.appendChild(newGameTopBtn);
+  // ── Top-left buttons (New Game + Replay) ────────────────────────────────
+  {
+    let topY = 52;
+    if (state.phase === 'showdown') {
+      const newGameTopBtn = document.createElement('button');
+      newGameTopBtn.textContent = 'New Game  ↺';
+      newGameTopBtn.style.cssText = [
+        `position:absolute;top:${topY}px;left:16px;z-index:100;`,
+        'background:linear-gradient(135deg,#1e3a5f,#2563eb);border:1px solid #1e40af;',
+        'color:white;border-radius:6px;padding:4px 10px;',
+        'font-size:11px;font-weight:600;cursor:pointer;letter-spacing:0.5px;',
+      ].join('');
+      newGameTopBtn.addEventListener('click', newGame);
+      canvas.appendChild(newGameTopBtn);
+      topY += 28;
+    }
+    if (replayByHand.size > 0 && gameStarted) {
+      const replayTopBtn = document.createElement('button');
+      replayTopBtn.textContent = '⏪ Replay';
+      replayTopBtn.style.cssText = [
+        `position:absolute;top:${topY}px;left:16px;z-index:100;`,
+        'background:linear-gradient(135deg,#1e3a5f,#1e40af);border:1px solid #1e40af;',
+        'color:#93c5fd;border-radius:6px;padding:4px 10px;',
+        'font-size:11px;font-weight:600;cursor:pointer;letter-spacing:0.5px;',
+      ].join('');
+      replayTopBtn.addEventListener('click', () => { replayMode = true; replayCursor = 0; render(); });
+      canvas.appendChild(replayTopBtn);
+    }
   }
 
   // ── Settings gear button ──
@@ -2877,33 +2892,15 @@ function render(): void {
       m.style.cssText = 'background:rgba(239,68,68,0.15);border:1px solid #ef4444;border-radius:8px;padding:5px 14px;color:#f87171;font-size:13px;font-weight:600;';
       m.textContent = "💸 You're out of chips!"; msgRow.appendChild(m);
       // New Game button directly in the actions area
-      const bustRow = document.createElement('div');
-      bustRow.style.cssText = 'display:flex;gap:8px;margin-top:6px;margin-bottom:20px;';
       const bustBtn = document.createElement('button');
       bustBtn.className = 'btn-action';
       bustBtn.style.cssText = [
         'background:linear-gradient(135deg,#7f1d1d,#dc2626);border-color:#b91c1c;',
-        'padding-bottom:12px;',
+        'margin-top:6px;padding-bottom:12px;margin-bottom:20px;',
       ].join('');
       bustBtn.textContent = 'New Game  ↺';
       bustBtn.addEventListener('click', newGame);
-      bustRow.appendChild(bustBtn);
-      if (replayByHand.size > 0) {
-        const replayBtn = document.createElement('button');
-        replayBtn.className = 'btn-action';
-        replayBtn.style.cssText = [
-          'background:linear-gradient(135deg,#1e3a5f,#1e40af);border-color:#1e40af;',
-          'padding-bottom:12px;',
-        ].join('');
-        replayBtn.textContent = '⏪ Replay';
-        replayBtn.addEventListener('click', () => {
-          replayMode = true;
-          replayCursor = 0;
-          render();
-        });
-        bustRow.appendChild(replayBtn);
-      }
-      msgRow.appendChild(bustRow);
+      msgRow.appendChild(bustBtn);
     } else if (gameOver) {
       const m = document.createElement('div');
       m.style.cssText = 'font-size:13px;color:#fbbf24;font-weight:600;';

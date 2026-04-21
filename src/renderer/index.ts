@@ -92,6 +92,7 @@ let consecutiveWins = 0;
 // ── Per-hand tracking ──
 let userEquityAtLastStreet = 0;
 let dealerJustMoved = false;
+const recentlyBustedIds: Set<number> = new Set(); // players currently shaking on bust
 
 // ── Per-hand mistake / GTO tracking ──
 interface HandDecision {
@@ -136,6 +137,7 @@ let selectedCardBack: CardBack = (localStorage.getItem('cardBack') as CardBack) 
 type AnimSpeed = 'normal' | 'fast' | 'off';
 let animSpeed: AnimSpeed = 'normal';
 let masterVolume = 1.0;
+let muckLosingHands = localStorage.getItem('muckLosers') === 'true';
 
 // ─── Canvas dimensions (match PokerRoom.png exactly) ─────────────────────────
 const BASE_W = 1366;
@@ -814,10 +816,75 @@ function playBigWinSound(): void {
 }
 
 let ambientStarted = false;
+let _ambientInterval: ReturnType<typeof setInterval> | null = null;
+
+/** Urgent tick for time-bank countdown (≤5 s) */
+function playTickSound(): void {
+  try {
+    const ctx  = audioCtx();
+    const t    = ctx.currentTime;
+    const osc  = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'square';
+    osc.frequency.value = 880;
+    gain.gain.setValueAtTime(0.10, t);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.05);
+    osc.connect(gain); gain.connect(masterOut());
+    osc.start(t); osc.stop(t + 0.06);
+  } catch { /* ignore */ }
+}
+
+/** Dual-clink sound for a pot split */
+function playSoundTie(): void {
+  // Two chip clinks slightly offset — one per winner
+  if (tryBufPick(_range('chip-lay', 3), 0.7)) {
+    setTimeout(() => tryBufPick(_range('chip-lay', 3), 0.6), 120);
+    return;
+  }
+  noise(0,     0.028, 0.20, 2200, 8);
+  beep(1800,   0,     0.012, 0.08, 'triangle');
+  noise(0.12,  0.028, 0.18, 2400, 8);
+  beep(2000,   0.12,  0.012, 0.07, 'triangle');
+}
+
+/** Ambient casino background loop — quiet murmur + occasional distant chip */
+function startAmbientLoop(): void {
+  if (ambientStarted || masterVolume === 0) return;
+  ambientStarted = true;
+
+  const playAmbientTick = () => {
+    if (masterVolume === 0) return;
+    try {
+      const ctx = audioCtx();
+      // Soft crowd murmur: low-pass filtered noise
+      const len = Math.ceil(ctx.sampleRate * 1.8);
+      const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+      const d   = buf.getChannelData(0);
+      for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * 0.012;
+      const src  = ctx.createBufferSource(); src.buffer = buf;
+      const lp   = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 280; lp.Q.value = 0.7;
+      const gain = ctx.createGain(); gain.gain.value = 0.08 * masterVolume;
+      src.connect(lp); lp.connect(gain); gain.connect(masterOut());
+      src.start();
+    } catch { /* ignore */ }
+
+    // Occasional distant chip sound every 4–9 seconds
+    if (Math.random() < 0.35) {
+      setTimeout(() => {
+        if (masterVolume > 0) tryBufPick(_range('chips-handle', 6), 0.08 * masterVolume);
+      }, Math.random() * 2000);
+    }
+  };
+
+  playAmbientTick();
+  _ambientInterval = setInterval(playAmbientTick, 1800);
+}
 
 function playHandEndSounds(winnerIds: number[], userPlayer: Player): void {
   const userWon  = winnerIds.includes(userPlayer.id);
   const userBust = !userWon && userPlayer.chips <= 0;
+  // Genuine split — play the tie sound regardless of who's involved
+  if (state.splitPotWinnerIds.length > 1) { playSoundTie(); return; }
   if (userWon) {
     if (state.pot > 50000) playBigWinSound();
     else playSoundUserWin();
@@ -875,6 +942,9 @@ const CARD_BACK_BORDER: Record<CardBack, string> = {
 function createCardEl(card: Card, faceUp: boolean, extraClass = ''): HTMLElement {
   const el = document.createElement('div');
   el.className = `card ${faceUp ? 'card-face' : 'card-back'} ${extraClass}`;
+  // Data attributes used for best-hand highlighting
+  el.dataset.rank = card.rank;
+  el.dataset.suit = card.suit;
   if (faceUp) {
     el.style.color = getSuitColor(card.suit);
     el.innerHTML = `
@@ -890,20 +960,6 @@ function createCardEl(card: Card, faceUp: boolean, extraClass = ''): HTMLElement
   return el;
 }
 
-// ─── Busted / empty seat ──────────────────────────────────────────────────────
-function renderEmptySeat(player: Player, pos: typeof SEAT_POSITIONS[0]): HTMLElement {
-  const wrap = document.createElement('div');
-  wrap.style.cssText = `position:absolute;top:${pos.y}px;left:${pos.x}px;transform:translate(-50%,-50%);z-index:10;display:flex;flex-direction:column;align-items:center;gap:3px;opacity:0.25;pointer-events:none;`;
-  const nameEl = document.createElement('div');
-  nameEl.style.cssText = 'background:rgba(0,0,0,0.5);border:1px dashed rgba(255,255,255,0.2);color:#6b7280;padding:3px 8px;border-radius:6px;font-size:12px;white-space:nowrap;';
-  nameEl.textContent = player.name;
-  const outEl = document.createElement('div');
-  outEl.style.cssText = 'font-size:10px;color:#ef4444;font-weight:700;letter-spacing:1px;';
-  outEl.textContent = 'OUT';
-  wrap.appendChild(nameEl);
-  wrap.appendChild(outEl);
-  return wrap;
-}
 
 // ─── Player cards rendering ───────────────────────────────────────────────────
 function renderPlayerCards(player: Player, pos: typeof SEAT_POSITIONS[0]): HTMLElement {
@@ -952,6 +1008,19 @@ function renderPlayerCards(player: Player, pos: typeof SEAT_POSITIONS[0]): HTMLE
       });
     } else {
       // ── Normal (non-folded) card rendering ───────────────────────────────
+      // Muck: hide losing AI cards face-down at showdown (show backs + mucked label)
+      if (muckLosingHands && isLoser && !player.isUser) {
+        for (const card of player.holeCards) {
+          cardsEl.appendChild(createCardEl(card, false));
+        }
+        const mucked = document.createElement('div');
+        mucked.style.cssText = 'font-size:9px;color:#6b7280;text-align:center;margin-top:2px;letter-spacing:0.5px;';
+        mucked.textContent = 'mucked';
+        wrap.appendChild(cardsEl);
+        wrap.appendChild(mucked);
+        return wrap;
+      }
+
       const alwaysFaceUp = player.isUser || state.phase === 'showdown';
       for (const card of player.holeCards) {
         const key    = cardKey(card);
@@ -968,18 +1037,42 @@ function renderPlayerCards(player: Player, pos: typeof SEAT_POSITIONS[0]): HTMLE
         cardsEl.appendChild(cardEl);
       }
       if (isWinner && state.phase === 'showdown') {
-        cardsEl.querySelectorAll<HTMLElement>('.card').forEach(c => c.classList.add('card-winner'));
+        const bestKeys = new Set(
+          (player.handResult?.bestHand ?? []).map(c => `${c.rank}-${c.suit}`)
+        );
+        cardsEl.querySelectorAll<HTMLElement>('.card').forEach(c => {
+          const k = `${c.dataset.rank}-${c.dataset.suit}`;
+          if (bestKeys.has(k)) c.classList.add('card-best-hand');
+          else                 c.classList.add('card-winner');
+        });
       }
     }
   }
 
   wrap.appendChild(cardsEl);
+
+  // ── Pre-flop hand strength hint (user only, before any community cards) ───
+  if (player.isUser && state.phase === 'preflop' && player.holeCards.length === 2 && winOdds) {
+    const eq = winOdds.fair.equityPct;
+    let label = '', bg = '', color = '';
+    if      (eq >= 65) { label = 'Premium';  bg = 'rgba(251,191,36,0.25)'; color = '#fbbf24'; }
+    else if (eq >= 55) { label = 'Strong';   bg = 'rgba(74,222,128,0.20)'; color = '#4ade80'; }
+    else if (eq >= 45) { label = 'Playable'; bg = 'rgba(96,165,250,0.20)'; color = '#60a5fa'; }
+    else if (eq >= 35) { label = 'Marginal'; bg = 'rgba(251,146,60,0.20)'; color = '#fb923c'; }
+    else               { label = 'Trash';    bg = 'rgba(248,113,113,0.20)'; color = '#f87171'; }
+    const hint = document.createElement('div');
+    hint.className = 'hand-strength-hint';
+    hint.style.cssText += `background:${bg};color:${color};border:1px solid ${color};`;
+    hint.textContent = label;
+    wrap.appendChild(hint);
+  }
+
   return wrap;
 }
 
 // ─── Player info panel rendering ──────────────────────────────────────────────
 function renderPlayerInfo(player: Player, pos: typeof INFO_POSITIONS[0]): HTMLElement {
-  if (player.isBusted) return renderEmptySeat(player, pos);
+  if (player.isBusted) return document.createElement('div'); // nothing shown for busted seats
 
   const isWinner   = state.winnerIds.includes(player.id);
   const isThinking = player.id === thinkingPlayerId;
@@ -991,7 +1084,8 @@ function renderPlayerInfo(player: Player, pos: typeof INFO_POSITIONS[0]): HTMLEl
 
   const wrap = document.createElement('div');
   // No 'folded' class on the info panel — folding only dims the card wrap, not the name/chips
-  wrap.className = `player-seat absolute flex flex-col items-center gap-1 ${isWinner ? 'winner' : ''}`;
+  const isBusting = recentlyBustedIds.has(player.id);
+  wrap.className = `player-seat absolute flex flex-col items-center gap-1 ${isWinner ? 'winner' : ''} ${isBusting ? 'player-busting' : ''}`;
   wrap.id = `player-${player.id}`;
   wrap.style.cssText = `top:${pos.y}px;left:${pos.x}px;transform:translate(-50%,-50%);z-index:10;`;
   if (isMyTurn) wrap.style.cssText += 'filter:drop-shadow(0 0 14px #facc15);';
@@ -1260,7 +1354,7 @@ function renderPotOnTable(): HTMLElement {
 }
 
 // ─── Community cards ──────────────────────────────────────────────────────────
-function renderCommunityArea(): HTMLElement {
+function renderCommunityArea(bestHandKeys: Set<string> = new Set()): HTMLElement {
   const wrap = document.createElement('div');
   wrap.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:8px;';
 
@@ -1289,7 +1383,10 @@ function renderCommunityArea(): HTMLElement {
 
   for (let i = 0; i < 5; i++) {
     if (i < state.communityCards.length) {
-      container.appendChild(createCardEl(state.communityCards[i], true, 'community-card'));
+      const c  = state.communityCards[i];
+      const el = createCardEl(c, true, 'community-card');
+      if (bestHandKeys.has(`${c.rank}-${c.suit}`)) el.classList.add('card-best-hand');
+      container.appendChild(el);
     } else {
       const slot = document.createElement('div');
       slot.style.cssText = 'width:56px;height:80px;border-radius:6px;border:2px dashed rgba(255,255,255,0.12);background:rgba(0,0,0,0.15);';
@@ -1366,9 +1463,12 @@ function renderActionPanel(): HTMLElement {
   }
 
   // ── Pot / call info ──
+  const posLbl   = getPositionLabel(user, state);
+  const posColor = POS_COLOR[posLbl] ?? '#9ca3af';
   const info = document.createElement('div');
-  info.style.cssText = 'display:flex;gap:20px;font-size:12px;color:#9ca3af;';
+  info.style.cssText = 'display:flex;gap:16px;font-size:12px;color:#9ca3af;align-items:center;flex-wrap:wrap;justify-content:center;';
   info.innerHTML = [
+    posLbl ? `<span style="font-size:10px;font-weight:700;color:${posColor};background:rgba(0,0,0,0.4);padding:1px 6px;border-radius:4px;border:1px solid ${posColor}40;">${posLbl}</span>` : '',
     `<span>Pot <b style="color:#fbbf24">${fmt(state.pot)}</b></span>`,
     canCheck
       ? `<span style="color:#4ade80">Free to check ✓</span>`
@@ -1589,6 +1689,24 @@ function renderSettingsPanel(): HTMLElement {
   }
   backWrap.appendChild(backGrid);
   panel.appendChild(backWrap);
+
+  // Muck losing hands toggle
+  const muckWrap = document.createElement('div');
+  muckWrap.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:10px;cursor:pointer;';
+  const muckChk  = document.createElement('input');
+  muckChk.type = 'checkbox'; muckChk.checked = muckLosingHands;
+  muckChk.style.cssText = 'width:14px;height:14px;accent-color:#fbbf24;cursor:pointer;';
+  const muckLbl  = document.createElement('label');
+  muckLbl.style.cssText = 'color:#9ca3af;font-size:11px;cursor:pointer;';
+  muckLbl.textContent = '🂠 Muck losing hands at showdown';
+  muckChk.addEventListener('change', () => {
+    muckLosingHands = muckChk.checked;
+    localStorage.setItem('muckLosers', String(muckLosingHands));
+    render();
+  });
+  muckLbl.addEventListener('click', () => { muckChk.click(); });
+  muckWrap.appendChild(muckChk); muckWrap.appendChild(muckLbl);
+  panel.appendChild(muckWrap);
 
   // Save / Load
   const saveRow = document.createElement('div');
@@ -1860,7 +1978,29 @@ function render(): void {
 
   const centerArea = document.createElement('div');
   centerArea.style.cssText = 'position:absolute;top:358px;left:683px;transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;gap:8px;z-index:5;';
-  centerArea.appendChild(renderCommunityArea());
+  // Build set of cards forming the winner's best hand (for community card highlight)
+  const _primaryWinner = state.winnerIds[0] != null ? state.players[state.winnerIds[0]] : null;
+  const _bestHandKeys  = new Set(
+    (_primaryWinner?.handResult?.bestHand ?? []).map(c => `${c.rank}-${c.suit}`)
+  );
+  centerArea.appendChild(renderCommunityArea(state.phase === 'showdown' ? _bestHandKeys : new Set()));
+
+  // ── All-in run-out banner ─────────────────────────────────────────────────
+  const _active = state.players.filter(p => !p.isFolded && !p.isBusted);
+  const _allAllIn = _active.length > 1 && _active.every(p => p.isAllIn);
+  if (_allAllIn && state.phase !== 'showdown' && state.phase !== 'idle') {
+    const runout = document.createElement('div');
+    runout.className = 'allin-runout-banner';
+    runout.style.cssText = [
+      'background:linear-gradient(135deg,rgba(249,115,22,0.3),rgba(239,68,68,0.3));',
+      'border:1px solid rgba(249,115,22,0.6);border-radius:8px;',
+      'padding:3px 14px;font-size:11px;font-weight:700;color:#fed7aa;',
+      'letter-spacing:0.8px;text-transform:uppercase;margin-top:6px;',
+    ].join('');
+    runout.textContent = '🔥 All-in — Running it out';
+    centerArea.appendChild(runout);
+  }
+
   canvas.appendChild(centerArea);
 
   if (gameStarted) {
@@ -2033,16 +2173,57 @@ function render(): void {
   if (isUserTurn) bottomHUD.appendChild(renderActionPanel());
 
   if (state.phase === 'showdown' && state.winnerIds.length > 0) {
-    const winnerNames = state.winnerIds.map(id => state.players[id].name).join(' & ');
-    const hand = state.players[state.winnerIds[0]].handResult?.description ?? '';
+    const user    = state.players.find(p => p.isUser)!;
+    const userWon = state.winnerIds.includes(user.id);
+
+    // ── Build winner announcement with proper disambiguation ─────────────────
+    const isSplit       = state.splitPotWinnerIds.length > 1;
+    const isMultiPot    = !isSplit && state.winnerIds.length > 1; // each won a different side pot
+    const showdownPlrs  = state.players.filter(p => !p.isFolded && !p.isBusted);
+    const isHeadsUp1v1  = showdownPlrs.length === 2 && !isSplit;
+
     const winEl = document.createElement('div');
-    winEl.style.cssText = 'background:linear-gradient(135deg,rgba(251,191,36,0.2),rgba(245,158,11,0.2));border:2px solid #fbbf24;border-radius:12px;padding:6px 20px;color:#fbbf24;font-size:17px;font-weight:bold;text-align:center;';
-    winEl.innerHTML = `🏆 ${winnerNames} wins${hand ? ` with <em>${hand}</em>` : ''}!`;
+
+    if (isSplit) {
+      // Genuine tie — same hand, split pot
+      const names = state.splitPotWinnerIds.map(id => state.players[id].name).join(' & ');
+      const hand  = state.players[state.splitPotWinnerIds[0]].handResult?.description ?? '';
+      winEl.style.cssText = 'background:linear-gradient(135deg,rgba(99,102,241,0.25),rgba(139,92,246,0.25));border:2px solid #818cf8;border-radius:12px;padding:6px 20px;color:#a5b4fc;font-size:16px;font-weight:bold;text-align:center;';
+      winEl.innerHTML = `🤝 Split pot! <b>${names}</b> tie${hand ? ` with <em>${hand}</em>` : ''}`;
+    } else if (isMultiPot) {
+      // Different side pots — explain each winner
+      winEl.style.cssText = 'background:linear-gradient(135deg,rgba(251,191,36,0.15),rgba(245,158,11,0.15));border:2px solid #fbbf24;border-radius:12px;padding:6px 16px;color:#fbbf24;font-size:14px;font-weight:bold;text-align:center;';
+      const lines = state.winnerIds.map((id, idx) => {
+        const p    = state.players[id];
+        const hand = p.handResult?.description ?? '';
+        const pot  = idx === 0 ? 'main pot' : `side pot ${idx}`;
+        return `<div>${p.name} wins <em style="color:#fed7aa;">${pot}</em>${hand ? ` — ${hand}` : ''}</div>`;
+      });
+      winEl.innerHTML = `🏆 ${lines.join('')}`;
+    } else {
+      // Single clean winner
+      const winner = state.players[state.winnerIds[0]];
+      const hand   = winner.handResult?.description ?? '';
+      winEl.style.cssText = 'background:linear-gradient(135deg,rgba(251,191,36,0.2),rgba(245,158,11,0.2));border:2px solid #fbbf24;border-radius:12px;padding:6px 20px;color:#fbbf24;font-size:17px;font-weight:bold;text-align:center;';
+      winEl.innerHTML = `🏆 <b>${winner.name}</b> wins${hand ? ` with <em>${hand}</em>` : ''}!`;
+    }
     bottomHUD.appendChild(winEl);
 
-    // Post-hand breakdown for user
-    const user = state.players.find(p => p.isUser)!;
-    const userWon = state.winnerIds.includes(user.id);
+    // ── 1v1 showdown: show both hands so loss/win is immediately clear ───────
+    if (isHeadsUp1v1) {
+      const [p1, p2] = showdownPlrs;
+      const h1 = p1.handResult?.description ?? '—';
+      const h2 = p2.handResult?.description ?? '—';
+      const vs = document.createElement('div');
+      vs.style.cssText = 'font-size:11px;color:#9ca3af;padding:2px 10px;text-align:center;';
+      const col = (p: typeof p1) => state.winnerIds.includes(p.id) ? '#4ade80' : '#f87171';
+      vs.innerHTML = `<span style="color:${col(p1)}">${p1.name}: <b>${h1}</b></span>`
+                   + ` <span style="color:#4b5563;margin:0 6px;">vs</span>`
+                   + `<span style="color:${col(p2)}">${p2.name}: <b>${h2}</b></span>`;
+      bottomHUD.appendChild(vs);
+    }
+
+    // ── Post-hand equity breakdown ────────────────────────────────────────────
     if (userEquityAtLastStreet > 0) {
       const breakdown = document.createElement('div');
       breakdown.style.cssText = 'font-size:11px;padding:3px 10px;border-radius:6px;border:1px solid rgba(255,255,255,0.12);background:rgba(0,0,0,0.5);color:#9ca3af;';
@@ -2276,6 +2457,7 @@ function startTimeBank(): void {
   if (timeBankInterval) clearInterval(timeBankInterval);
   timeBankInterval = setInterval(() => {
     timeBankSeconds--;
+    if (timeBankSeconds <= 5 && timeBankSeconds > 0) playTickSound();
     render();
     if (timeBankSeconds <= 0) {
       stopTimeBank();
@@ -2380,6 +2562,11 @@ async function runBettingRound(): Promise<boolean> {
             if (c) rCards.push(c);
           }
           rabbitCards = rCards;
+          // Auto-show rabbit cards briefly after fold
+          if (rCards.length > 0) {
+            setTimeout(() => { showRabbit = true;  render(); }, 600);
+            setTimeout(() => { showRabbit = false; render(); }, 4200);
+          }
         } else {
           rabbitCards = [];
         }
@@ -2526,6 +2713,15 @@ async function doShowdown(): Promise<void> {
   state = evaluateHands(state);
   state = awardPot(state);
 
+  // ── Bust animation: detect players that just hit 0 chips ──────────────────
+  const newlyBusted = state.players.filter(p => !p.isBusted && p.chips === 0);
+  if (newlyBusted.length > 0) {
+    newlyBusted.forEach(p => { recentlyBustedIds.add(p.id); playSoundBust(); });
+    render();
+    await sleep(700);
+    newlyBusted.forEach(p => recentlyBustedIds.delete(p.id));
+  }
+
   // Record hand history
   const winner   = state.players[state.winnerIds[0]];
   const handDesc = winner.handResult?.description ?? '';
@@ -2555,9 +2751,12 @@ async function doShowdown(): Promise<void> {
 
   await sleep(200);
 
-  // Chip slide to winner
+  // Chip slide to all winners (split evenly for ties / side pots)
   if (state.winnerIds.length > 0) {
-    animateChipsToWinner(state.winnerIds[0], potBeforeAward);
+    const share = Math.round(potBeforeAward / state.winnerIds.length);
+    state.winnerIds.forEach((wId, i) => {
+      setTimeout(() => animateChipsToWinner(wId, share), i * 180);
+    });
   }
 
   // Confetti for user win
@@ -2727,6 +2926,25 @@ function buildPostHandAnalysis(potSize: number, user: Player, gs: GameState): st
     }
   }
 
+  // ── Pre-flop hand strength context ────────────────────────────────────────
+  const preflopDec = handDecisions.find(d => d.street === 'preflop');
+  if (preflopDec && ctx?.userHoleCards) {
+    const peq = preflopDec.equity;
+    const cat = peq >= 65 ? 'Premium' : peq >= 55 ? 'Strong' : peq >= 45 ? 'Playable' : peq >= 35 ? 'Marginal' : 'Trash';
+    const catDetail: Record<string, string> = {
+      Premium:  'Strong pairs (AA–QQ) or broadway connectors (AKs). Play aggressively — always raise/re-raise.',
+      Strong:   'Good pairs or strong broadway (JJ–99, AQs, AJs). Open-raise; call one 3-bet with caution.',
+      Playable: 'Speculative hands (suited connectors, small pairs). Limp or min-raise in position; fold to big 3-bets.',
+      Marginal: 'Barely break-even hands. Fold to raises; occasionally limp in late position.',
+      Trash:    'Below-average starting cards. Fold pre-flop, especially against any raise.',
+    };
+    notes.unshift({
+      icon:   '📖',
+      text:   `Pre-flop: ${cat} hand (${ctx.userHoleCards})`,
+      detail: catDetail[cat],
+    });
+  }
+
   // ── Hand outcome notes ─────────────────────────────────────────────────────
   const finalEq = ctx?.finalEquity ?? 0;
   if (userWon && finalEq > 0 && finalEq < 25) {
@@ -2831,6 +3049,15 @@ async function endByFold(): Promise<void> {
   const potBeforeAward = state.pot;
   state = { ...state, winnerIds: [winner.id], phase: 'showdown' };
   state = awardPot(state);
+
+  // ── Bust animation: detect players that just hit 0 chips ──────────────────
+  const newlyBustedF = state.players.filter(p => !p.isBusted && p.chips === 0);
+  if (newlyBustedF.length > 0) {
+    newlyBustedF.forEach(p => { recentlyBustedIds.add(p.id); playSoundBust(); });
+    render();
+    await sleep(700);
+    newlyBustedF.forEach(p => recentlyBustedIds.delete(p.id));
+  }
 
   // Record hand history
   const user = state.players.find(p => p.isUser)!;
@@ -3033,6 +3260,9 @@ if (_saved) {
 
 render();
 window.addEventListener('resize', applyCanvasScale);
+
+// Start ambient casino loop on first interaction (AudioContext needs a user gesture)
+document.addEventListener('click', () => startAmbientLoop(), { once: true });
 
 // ─── Keyboard shortcuts ───────────────────────────────────────────────────────
 window.addEventListener('keydown', (e: KeyboardEvent) => {

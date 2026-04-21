@@ -599,10 +599,20 @@ export function awardPot(state: GameState): GameState {
     const share     = Math.floor(pot.amount / potWinners.length);
     const remainder = pot.amount % potWinners.length;
 
+    // A pot with only 1 eligible player is an uncontested refund (the player's own
+    // uncovered chips returned to them). Don't treat this as a "win" in the UI —
+    // only add to allWinnerIds when the pot was contested (2+ eligible) or when
+    // this is the fold-win path (bestScore === -Infinity, where pre-set winnerIds
+    // already identifies the correct sole winner).
+    const isContested  = eligible.length > 1;
+    const isFoldPath   = bestScore === -Infinity;
+
     potWinners.forEach((w, i) => {
       const p = players.find(pl => pl.id === w.id)!;
       p.chips += share + (i === 0 ? remainder : 0);
-      if (!allWinnerIds.includes(p.id)) allWinnerIds.push(p.id);
+      if ((isContested || isFoldPath) && !allWinnerIds.includes(p.id)) {
+        allWinnerIds.push(p.id);
+      }
     });
 
     // If this pot had multiple winners with the SAME score, they truly split it.

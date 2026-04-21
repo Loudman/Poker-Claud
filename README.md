@@ -67,7 +67,7 @@ src/
 ├── preload/
 │   └── preload.ts               # Context bridge (contextIsolation: true)
 └── renderer/
-    ├── index.ts                 # Full UI engine (~3,300+ lines)
+    ├── index.ts                 # Full UI engine (~3,400+ lines)
     ├── index.html               # Single-div shell
     ├── styles.css               # TailwindCSS import + custom keyframes/classes
     ├── assets.d.ts              # PNG asset type declarations
@@ -210,9 +210,22 @@ Main pot  → eligible: all non-folded players
 Side pot  → eligible: players who matched the all-in amount
 ```
 
-### TIE vs. Different-Pot Winners
+### Winner Banner Disambiguation
+
+The winner announcement distinguishes four cases:
+
+| Scenario | Banner Style |
+|---|---|
+| **Genuine tie** (`splitPotWinnerIds.length > 1`) | Indigo — "🤝 Split pot! A & B tie with [hand]" |
+| **Multi-pot** (different side-pot winners) | Lists each winner with their pot label |
+| **Solo winner** | Gold — "🏆 [Name] wins with [hand]!" |
+| **1v1 showdown** | Shows both hands: "[PlayerA]: [hand] vs [PlayerB]: [hand]" with green/red colouring |
 
 `splitPotWinnerIds` tracks only players who **genuinely tied the same pot** (identical hand score). `winnerIds` may include multiple players who each won a *different* side pot. The UI uses `splitPotWinnerIds` to decide whether to display "TIE!" or "WINNER!" on each player's badge.
+
+### Chip Animation to All Winners
+
+After `awardPot()`, chip tokens animate from `POT_CANVAS` to **every winner's** chip position staggered 180ms apart. For split pots each winner receives `pot / n` chips; for side pots each winner receives their individual pot share.
 
 ### Session Stats (`SessionStats`)
 
@@ -479,6 +492,38 @@ Cards are dealt one at a time to each seat using the `dealCard` keyframe:
 
 At showdown, opponent cards flip in sequence with 300ms delays using the `flipCard` keyframe (rotateY 0° → 90° → 0°).
 
+### Best-Hand Card Glow (`card-best-hand`)
+
+At showdown, the **winning 5 cards** (the exact combination forming the best hand, from `HandResult.bestHand`) are highlighted with a pulsing gold-to-orange glow and lifted slightly. All other cards in the winner's hand dim to a secondary style.
+
+Cards are matched by `data-rank` / `data-suit` HTML attributes against a `Set<string>` of `rank-suit` keys. Community cards that are part of the best hand are highlighted in the same pass.
+
+```css
+@keyframes bestHandPulse {
+  0%, 100% { box-shadow: 0 0 0 2px #fbbf24, 0 0 14px 4px rgba(251,191,36,0.7); }
+  50%       { box-shadow: 0 0 0 3px #f97316, 0 0 24px 8px rgba(249,115,22,0.8); }
+}
+.card-best-hand {
+  animation: bestHandPulse 1.2s ease-in-out infinite;
+  transform: translateY(-6px) scale(1.07);
+}
+```
+
+### Bust Shake Animation (`player-busting`)
+
+When a player's chip count reaches 0 after `awardPot()`, they are added to `recentlyBustedIds`. On the next `render()` their info panel receives the `player-busting` class, triggering a dramatic shake:
+
+```css
+@keyframes bustShake {
+  0%   { transform: translate(-50%,-50%) translateX(0); }
+  15%  { transform: translate(-50%,-50%) translateX(-8px) rotate(-3deg); }
+  30%  { transform: translate(-50%,-50%) translateX(8px) rotate(3deg); }
+  ...
+}
+```
+
+The bust sound plays simultaneously. After 700ms the class is removed and the player disappears at `initHand` as normal.
+
 ---
 
 ## Audio System
@@ -493,19 +538,33 @@ Optional replacement audio files can be dropped into `src/renderer/assets/audio/
 | Chip click | Every bet/call/raise | 1200Hz triangle wave, 20ms |
 | User win | User wins hand | Ascending C5→E5→G5→C6→E6 arpeggio |
 | Other win | AI wins | Two-note ding (A5, C6) |
-| Bust | User eliminated | Descending sawtooth G4→E4→C4→G3 |
+| Tie / split pot | Genuine pot split | Dual chip clinks 120ms apart (680Hz + 900Hz) |
+| Bust | Player eliminated | Descending sawtooth G4→E4→C4→G3 |
 | Big win cheer | User wins pot > 50K | Ascending noise burst |
+| Time bank tick | ≤ 5 seconds remaining | 880Hz square-wave click each second |
+| Ambient casino | First user interaction | Low-pass filtered noise loop + randomised chip sounds, runs continuously in background |
 
 ---
 
 ## UI Panels & Controls
 
+### All-In Runout Banner
+
+When all active (non-folded) players are all-in, an animated orange banner appears in the centre of the table:
+
+```
+🔥 All-in — Running it out
+```
+
+This persists across the Flop, Turn, and River phases until the showdown resolves.
+
 ### Action Panel
 
 Shown only on the user's turn. Contains:
 
-- **Time bank bar** — 30-second countdown progress bar; auto check/fold on expiry
+- **Time bank bar** — 30-second countdown progress bar; auto check/fold on expiry; emits a tick sound each second when ≤ 5 seconds remain
 - **Pot odds row** — shown when facing a bet: "Pot odds: need X% equity · Yours: Y% ✓/✗"
+- **Position badge** — displays the user's current table position (UTG, HJ, CO, BTN, SB, BB) in colour next to the stack info
 - **Info line** — current pot, amount to call (or "Free to check"), user stack
 - **FOLD** button
 - **CHECK** or **CALL** button (label reflects call amount; upgrades to ALL-IN if stack ≤ call)
@@ -514,9 +573,23 @@ Shown only on the user's turn. Contains:
 - **ALL-IN** button
 - Keyboard hint row: `[F] Fold  [C] Check/Call  [R] Raise  [A] All-in`
 
+### Pre-Flop Hand Strength Hint
+
+During the pre-flop phase, the user's hole cards display a **colour-coded strength badge** based on Monte Carlo equity:
+
+| Label | Equity Threshold | Colour |
+|---|---|---|
+| Premium | ≥ 65% | Gold |
+| Strong | ≥ 55% | Green |
+| Playable | ≥ 45% | Blue |
+| Marginal | ≥ 35% | Orange |
+| Trash | < 35% | Red |
+
+The badge disappears once community cards are dealt.
+
 ### Time Bank
 
-A 30-second countdown starts when it is the user's turn. A yellow progress bar depletes left-to-right. On expiry:
+A 30-second countdown starts when it is the user's turn. A yellow progress bar depletes left-to-right. When **5 seconds or fewer** remain, an 880Hz tick sound plays each second. On expiry:
 - If check is available → auto check
 - Otherwise → auto fold
 
@@ -545,7 +618,11 @@ All values are clamped to `[minRaise, player.chips]`.
 
 ### Rabbit Hunting
 
-After folding, the user can click the **"🐇 Rabbit Hunt"** button to peek at what cards would have come on the remaining streets. The revealed cards are shown in a dimmed, greyed overlay for 4 seconds. This does not affect game state — the deck is only read, not modified.
+After folding, the **🐇 Rabbit Hunt** feature automatically reveals what cards would have come on the remaining streets:
+- Cards are shown automatically 600ms after the fold, with no button press needed
+- They remain visible for **3.5 seconds**, then disappear automatically
+- The user can also toggle them manually via the "🐇 Rabbit Hunt" button
+- Revealed cards are displayed in a dimmed, greyed overlay and do **not** affect game state — the deck is only read, not modified
 
 ### Deck Panel (collapsible, bottom-right)
 
@@ -613,6 +690,7 @@ For each recorded decision, the teacher applies the following rules:
 
 | Situation | Rule | Icon |
 |---|---|---|
+| Always (first note) | Pre-flop hand category + hole cards (Premium/Strong/Playable/Marginal/Trash) | 📖 |
 | Folded with equity > needed + 10% | "Folded too often" — –EV fold | ❌ |
 | Folded with equity marginally > needed | "Marginal fold" | ⚠️ |
 | Folded with equity < needed | "Good fold" | ✅ |
@@ -627,6 +705,8 @@ For each recorded decision, the teacher applies the following rules:
 | Lost with equity > 70% at end | "Bad beat" | 💔 |
 | Pre-flop aggressor who missed c-bet | "Missed c-bet opportunity" | 💡 |
 | No mistakes found, went to showdown | "Clean hand" | ✅ or 📖 |
+
+The **pre-flop hand strength note** is always prepended as the first note, even when no mistakes were made. It shows the hole cards, the strength category, and a brief coaching tip on how to play that class of hand.
 
 ### Teacher Panel UI
 
@@ -783,6 +863,10 @@ Four card back colour themes, selectable via a 2×2 grid:
 
 The selected theme is persisted in `localStorage` under the key `cardBack` and applied to all face-down cards immediately.
 
+### Muck Losing Hands
+
+A checkbox toggle — **Muck losing hands** — hides AI opponents' losing hole cards at showdown, replacing them with face-down card backs and a "mucked" label. This mirrors real-world etiquette where the losing player mucks without showing. The setting is persisted in `localStorage` under the key `muckLosers`.
+
 ### Save / Load / Clear
 
 - **Save Now** — manual `saveGame()` trigger with a confirmation toast
@@ -871,4 +955,8 @@ const FOLD_SIMS  = 800;   // AI equity decisions
 - **Rabbit hunting non-destructive** — peeking at future cards copies and slices the deck array without mutating live game state, so the hand can always continue normally.
 - **Side pot carryover** — `buildSidePots()` uses a `carryover` accumulator so chips from folded all-in players are never silently dropped; they roll into the next eligible pot.
 - **splitPotWinnerIds vs winnerIds** — `winnerIds` may contain multiple players who each won a *different* side pot; `splitPotWinnerIds` tracks only genuine same-pot ties, ensuring the "TIE!" badge is never shown incorrectly.
-- **Poker Teacher panel** — every decision is tracked with equity and pot-odds context so the post-hand analysis can give specific, actionable feedback rather than generic tips.
+- **Poker Teacher panel** — every decision is tracked with equity and pot-odds context so the post-hand analysis can give specific, actionable feedback rather than generic tips. The first note always shows the pre-flop hand category (Premium → Trash) with coaching on how to play that class of hand.
+- **Winner banner disambiguation** — three distinct banner styles (tie/split-pot, multi-pot, solo) plus a 1v1 side-by-side hand comparison eliminate ambiguity at showdown.
+- **Best-hand card glow** — `HandResult.bestHand` is matched against `data-rank`/`data-suit` DOM attributes to highlight exactly the 5 cards forming the winning combination, across both hole and community cards.
+- **Ambient casino audio** — a continuous low-pass noise loop with randomised chip sounds starts on first user interaction (satisfying the AudioContext autoplay policy) and runs for the duration of the session.
+- **Muck losing hands** — an optional setting hides AI losing hole cards at showdown, matching real-world table etiquette, persisted in `localStorage`.

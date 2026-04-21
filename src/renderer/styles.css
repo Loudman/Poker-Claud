@@ -377,3 +377,53 @@
   z-index: 600;
   animation: confettiFly 1.2s ease-out forwards;
 }
+
+/* Best-hand 5-card highlight (gold rainbow glow) */
+@keyframes bestHandPulse {
+  0%, 100% { box-shadow: 0 0 0 2px #fbbf24, 0 0 14px 4px rgba(251,191,36,0.7); }
+  50%       { box-shadow: 0 0 0 3px #f97316, 0 0 24px 8px rgba(249,115,22,0.8); }
+}
+
+.card-best-hand {
+  animation: bestHandPulse 1.2s ease-in-out infinite;
+  transform: translateY(-6px) scale(1.07);
+  z-index: 20;
+}
+
+/* Player bust: shake then fade */
+@keyframes bustShake {
+  0%   { transform: translate(-50%,-50%) translateX(0); }
+  15%  { transform: translate(-50%,-50%) translateX(-8px) rotate(-3deg); }
+  30%  { transform: translate(-50%,-50%) translateX(8px) rotate(3deg); }
+  45%  { transform: translate(-50%,-50%) translateX(-6px) rotate(-2deg); }
+  60%  { transform: translate(-50%,-50%) translateX(6px) rotate(2deg); }
+  75%  { transform: translate(-50%,-50%) translateX(-3px); }
+  100% { transform: translate(-50%,-50%) translateX(0); }
+}
+
+.player-busting {
+  animation: bustShake 0.55s ease-in-out forwards;
+}
+
+/* All-in run-out banner */
+@keyframes runoutPulse {
+  0%, 100% { opacity: 0.85; }
+  50%       { opacity: 1; }
+}
+
+.allin-runout-banner {
+  animation: runoutPulse 1s ease-in-out infinite;
+}
+
+/* Strength hint badge on user hole cards */
+.hand-strength-hint {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 10px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  margin-top: 4px;
+  pointer-events: none;
+  white-space: nowrap;
+}

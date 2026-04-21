@@ -40,7 +40,7 @@ import {
 } from './game/gameState';
 import { Card, getSuitSymbol, getSuitColor } from './game/deck';
 import {
-  WinOdds, calcWinOdds,
+  WinOdds, calcWinOdds, calcHeadsUpEquity,
   positionFromDealer, actionOrder,
 } from './game/winProbability';
 import { decideAIBet, calcAllEquities } from './game/bettingAI';
@@ -138,6 +138,59 @@ type AnimSpeed = 'normal' | 'fast' | 'off';
 let animSpeed: AnimSpeed = 'normal';
 let masterVolume = 1.0;
 let muckLosingHands = localStorage.getItem('muckLosers') === 'true';
+
+// ── Current-hand action log ──
+let handActionLog: string[]  = [];
+let actionLogExpanded        = false;
+
+// ── Voice announcements ──
+let voiceEnabled  = localStorage.getItem('voiceEnabled') !== 'false';  // on by default
+const _speechQueue: string[] = [];
+let _speechBusy   = false;
+
+// ── Dynamic music ──
+let musicEnabled   = localStorage.getItem('musicEnabled') === 'true';  // off by default
+let _musicDroneNode: OscillatorNode | null   = null;
+let _musicDroneGain: GainNode | null         = null;
+let _musicLFO:       OscillatorNode | null   = null;
+let _musicLFOGain:   GainNode | null         = null;
+let _musicFilter:    BiquadFilterNode | null = null;
+type MusicIntensity = 'idle' | 'normal' | 'allin' | 'showdown';
+let _musicIntensity: MusicIntensity = 'idle';
+
+// ── Equity calculator ──
+let equityCalcOpen = false;
+interface EquityCalcEntry { rank: string; suit: string; }
+interface EquityCalcInputs {
+  hand1: [EquityCalcEntry, EquityCalcEntry];
+  hand2: [EquityCalcEntry, EquityCalcEntry];
+  board: EquityCalcEntry[];
+}
+let equityCalcInputs: EquityCalcInputs = {
+  hand1: [{ rank: '', suit: '' }, { rank: '', suit: '' }],
+  hand2: [{ rank: '', suit: '' }, { rank: '', suit: '' }],
+  board: [0,1,2,3,4].map(() => ({ rank: '', suit: '' })),
+};
+let equityCalcResult: { win1: number; win2: number; tie: number } | null = null;
+
+// ── Session replay ──
+interface ReplaySnapshot {
+  phase:                string;
+  pot:                  number;
+  communityCards:       Card[];
+  players:              Array<{
+    id: number; name: string; chips: number; roundBet: number;
+    isFolded: boolean; isAllIn: boolean; isBusted: boolean; isUser: boolean;
+    holeCards: Card[];
+  }>;
+  actionLabel:          string;
+  dealerButtonPosition: number;
+  currentBet:           number;
+}
+let replaySnapshots: ReplaySnapshot[] = [];
+const replayByHand: Map<number, ReplaySnapshot[]> = new Map();
+let replayMode   = false;
+let replayCursor = 0;
 
 // ─── Canvas dimensions (match PokerRoom.png exactly) ─────────────────────────
 const BASE_W = 1366;
@@ -853,7 +906,8 @@ function startAmbientLoop(): void {
   ambientStarted = true;
 
   const playAmbientTick = () => {
-    if (masterVolume === 0) return;
+    // Only play ambient sounds while a game hand is actively running
+    if (masterVolume === 0 || !gameStarted || state.phase === 'idle') return;
     try {
       const ctx = audioCtx();
       // Soft crowd murmur: low-pass filtered noise
@@ -871,13 +925,517 @@ function startAmbientLoop(): void {
     // Occasional distant chip sound every 4–9 seconds
     if (Math.random() < 0.35) {
       setTimeout(() => {
-        if (masterVolume > 0) tryBufPick(_range('chips-handle', 6), 0.08 * masterVolume);
+        if (masterVolume > 0 && gameStarted && state.phase !== 'idle')
+          tryBufPick(_range('chips-handle', 6), 0.08 * masterVolume);
       }, Math.random() * 2000);
     }
   };
 
   playAmbientTick();
   _ambientInterval = setInterval(playAmbientTick, 1800);
+
+  // Start the music drone alongside the ambient loop
+  startMusicDrone();
+  setMusicIntensity('normal');
+}
+
+// ─── Voice announcements ──────────────────────────────────────────────────────
+const RANK_WORDS: Record<string, string> = {
+  '2':'Two','3':'Three','4':'Four','5':'Five','6':'Six','7':'Seven',
+  '8':'Eight','9':'Nine','10':'Ten','J':'Jack','Q':'Queen','K':'King','A':'Ace',
+};
+
+function cardToSpeech(card: Card): string {
+  return `${RANK_WORDS[card.rank] ?? card.rank} of ${card.suit}`;
+}
+
+function drainSpeechQueue(): void {
+  if (_speechBusy || _speechQueue.length === 0 || !voiceEnabled || masterVolume === 0) return;
+  const text = _speechQueue.shift()!;
+  _speechBusy = true;
+  const utt = new SpeechSynthesisUtterance(text);
+  utt.rate   = 1.15;
+  utt.pitch  = 1.0;
+  utt.volume = Math.min(1, masterVolume);
+  utt.onend  = () => { _speechBusy = false; drainSpeechQueue(); };
+  utt.onerror = () => { _speechBusy = false; drainSpeechQueue(); };
+  window.speechSynthesis.speak(utt);
+}
+
+function speakText(text: string): void {
+  if (!voiceEnabled || masterVolume === 0) return;
+  // Replace consecutive duplicates to avoid spam
+  if (_speechQueue[_speechQueue.length - 1] === text) return;
+  _speechQueue.push(text);
+  drainSpeechQueue();
+}
+
+// ─── Dynamic music drone ──────────────────────────────────────────────────────
+function startMusicDrone(): void {
+  if (!musicEnabled || _musicDroneNode) return;
+  try {
+    const ctx       = audioCtx();
+    _musicDroneNode = ctx.createOscillator();
+    _musicDroneGain = ctx.createGain();
+    _musicFilter    = ctx.createBiquadFilter();
+    _musicLFO       = ctx.createOscillator();
+    _musicLFOGain   = ctx.createGain();
+
+    _musicDroneNode.type = 'sawtooth';
+    _musicDroneNode.frequency.value = 55;     // low A — sub-bass drone
+    _musicFilter.type = 'lowpass';
+    _musicFilter.frequency.value = 180;
+    _musicFilter.Q.value = 0.9;
+    _musicDroneGain.gain.value = 0;            // starts silent, fades in via setMusicIntensity
+
+    _musicLFO.type = 'sine';
+    _musicLFO.frequency.value = 0.08;          // very slow tremolo
+    _musicLFOGain.gain.value  = 0.018;
+
+    _musicLFO.connect(_musicLFOGain);
+    _musicLFOGain.connect(_musicDroneGain.gain);
+    _musicDroneNode.connect(_musicFilter);
+    _musicFilter.connect(_musicDroneGain);
+    _musicDroneGain.connect(masterOut());
+
+    _musicDroneNode.start();
+    _musicLFO.start();
+  } catch { /* ignore */ }
+}
+
+function stopMusicDrone(): void {
+  if (!_musicDroneGain || !_musicDroneNode) return;
+  try {
+    const ctx = audioCtx();
+    _musicDroneGain.gain.linearRampToValueAtTime(0, ctx.currentTime + 2.5);
+    setTimeout(() => {
+      try { _musicDroneNode?.stop(); _musicLFO?.stop(); } catch { /* */ }
+      _musicDroneNode = null; _musicDroneGain = null;
+      _musicLFO = null; _musicLFOGain = null; _musicFilter = null;
+      _musicIntensity = 'idle';
+    }, 2700);
+  } catch { /* ignore */ }
+}
+
+function setMusicIntensity(level: MusicIntensity): void {
+  if (_musicIntensity === level || !musicEnabled) return;
+  _musicIntensity = level;
+  if (!_musicDroneGain || !_musicFilter || !_musicLFO) return;
+  try {
+    const ctx = audioCtx();
+    const t   = ctx.currentTime;
+    if (level === 'normal') {
+      _musicDroneGain.gain.linearRampToValueAtTime(0.050, t + 1.2);
+      _musicFilter.frequency.linearRampToValueAtTime(180, t + 1.2);
+      _musicLFO.frequency.linearRampToValueAtTime(0.08, t + 1.2);
+    } else if (level === 'allin') {
+      _musicDroneGain.gain.linearRampToValueAtTime(0.10, t + 0.5);
+      _musicFilter.frequency.linearRampToValueAtTime(340, t + 0.5);
+      _musicLFO.frequency.linearRampToValueAtTime(0.55, t + 0.5);
+    } else if (level === 'showdown') {
+      _musicDroneGain.gain.linearRampToValueAtTime(0.16, t + 0.8);
+      _musicDroneGain.gain.linearRampToValueAtTime(0.050, t + 3.5);
+      _musicLFO.frequency.linearRampToValueAtTime(0.28, t + 0.8);
+      _musicFilter.frequency.linearRampToValueAtTime(260, t + 0.8);
+    } else { // idle
+      _musicDroneGain.gain.linearRampToValueAtTime(0, t + 3);
+    }
+  } catch { /* ignore */ }
+}
+
+// ─── Live pot-odds arc ────────────────────────────────────────────────────────
+function renderPotOddsArc(): HTMLElement {
+  const wrap = document.createElement('div');
+  wrap.style.cssText = `position:absolute;left:${POT_CANVAS.x - 52}px;top:${POT_CANVAS.y - 122}px;pointer-events:none;z-index:7;opacity:0.9;`;
+
+  const user       = state.players.find(p => p.isUser)!;
+  const callAmount = Math.min(state.currentBet - user.roundBet, user.chips);
+  if (callAmount <= 0 || !winOdds) return wrap;
+
+  const potOdds  = Math.round(callAmount / (state.pot + callAmount) * 100);
+  const equity   = Math.round(winOdds.fair.equityPct);
+  const isGood   = equity >= potOdds;
+  const sz = 104, cx = 52, cy = 52, r = 42;
+
+  function deg2xy(deg: number): [number, number] {
+    const rad = (deg - 90) * Math.PI / 180;
+    return [cx + r * Math.cos(rad), cy + r * Math.sin(rad)];
+  }
+  function arcPath(pct: number): string {
+    if (pct <= 0) return '';
+    const deg = Math.min(pct, 99.9) / 100 * 360;
+    const [x1, y1] = deg2xy(0);
+    const [x2, y2] = deg2xy(deg);
+    return `M ${cx} ${cy} L ${x1} ${y1} A ${r} ${r} 0 ${deg > 180 ? 1 : 0} 1 ${x2} ${y2} Z`;
+  }
+
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('width',   String(sz));
+  svg.setAttribute('height',  String(sz));
+  svg.setAttribute('viewBox', `0 0 ${sz} ${sz}`);
+
+  // Background circle
+  const bg = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  bg.setAttribute('cx', String(cx)); bg.setAttribute('cy', String(cy)); bg.setAttribute('r', String(r));
+  bg.setAttribute('fill', 'rgba(0,0,0,0.50)');
+  bg.setAttribute('stroke', 'rgba(255,255,255,0.07)'); bg.setAttribute('stroke-width', '1');
+  svg.appendChild(bg);
+
+  // Equity fill arc
+  const arcEl = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  arcEl.setAttribute('d', arcPath(equity));
+  arcEl.setAttribute('fill', isGood ? 'rgba(34,197,94,0.50)' : 'rgba(239,68,68,0.42)');
+  svg.appendChild(arcEl);
+
+  // Pot-odds threshold line (gold dashed)
+  const [lx, ly] = deg2xy(potOdds / 100 * 360);
+  const ln = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+  ln.setAttribute('x1', String(cx)); ln.setAttribute('y1', String(cy));
+  ln.setAttribute('x2', String(lx)); ln.setAttribute('y2', String(ly));
+  ln.setAttribute('stroke', '#fbbf24'); ln.setAttribute('stroke-width', '1.5');
+  ln.setAttribute('stroke-dasharray', '3 2');
+  svg.appendChild(ln);
+
+  // Center labels
+  const mkTxt = (txt: string, dy: number, fill: string, sz2: number, bold = false) => {
+    const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    t.setAttribute('x', String(cx)); t.setAttribute('y', String(cy + dy));
+    t.setAttribute('text-anchor', 'middle'); t.setAttribute('fill', fill);
+    t.setAttribute('font-size', String(sz2));
+    if (bold) t.setAttribute('font-weight', '700');
+    t.textContent = txt; return t;
+  };
+  svg.appendChild(mkTxt(`${equity}%`,      -4, isGood ? '#4ade80' : '#f87171', 12, true));
+  svg.appendChild(mkTxt(`need ${potOdds}%`, 8, '#9ca3af', 8));
+
+  wrap.appendChild(svg);
+  return wrap;
+}
+
+// ─── Current-hand action log ──────────────────────────────────────────────────
+function renderActionLogPanel(): HTMLElement {
+  const panel = document.createElement('div');
+  panel.style.cssText = 'position:absolute;bottom:12px;left:12px;z-index:110;max-width:260px;';
+
+  const header = document.createElement('div');
+  header.style.cssText = [
+    'background:rgba(0,0,0,0.82);border:1px solid rgba(255,255,255,0.12);',
+    actionLogExpanded ? 'border-radius:8px 8px 0 0;' : 'border-radius:8px;',
+    'padding:5px 10px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;',
+  ].join('');
+  const ht = document.createElement('span');
+  ht.style.cssText = 'font-size:10px;font-weight:700;color:#9ca3af;letter-spacing:0.8px;text-transform:uppercase;';
+  ht.textContent = '📋 Action Log';
+  const tog = document.createElement('span');
+  tog.style.cssText = 'font-size:9px;color:#6b7280;';
+  tog.textContent = actionLogExpanded ? '▼' : '▶';
+  header.appendChild(ht); header.appendChild(tog);
+  header.addEventListener('click', () => { actionLogExpanded = !actionLogExpanded; render(); });
+  panel.appendChild(header);
+
+  if (!actionLogExpanded || handActionLog.length === 0) return panel;
+
+  const body = document.createElement('div');
+  body.style.cssText = [
+    'background:rgba(0,0,0,0.78);border:1px solid rgba(255,255,255,0.09);border-top:none;',
+    'border-radius:0 0 8px 8px;padding:4px 6px;',
+    'max-height:150px;overflow-y:auto;display:flex;flex-direction:column;gap:1px;',
+  ].join('');
+
+  const entries = handActionLog.slice(-40);
+  for (const entry of entries) {
+    const el = document.createElement('div');
+    el.title = entry;
+    el.style.cssText = 'font-size:10px;padding:1px 4px;border-radius:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+    if (/^(Flop|Turn|River|Blinds)/.test(entry)) {
+      el.style.color = '#67e8f9'; el.style.background = 'rgba(6,182,212,0.08)';
+    } else if (/raises|ALL-IN/.test(entry)) {
+      el.style.color = '#fbbf24';
+    } else if (/folds/.test(entry)) {
+      el.style.color = '#f87171';
+    } else if (/wins|splits/.test(entry)) {
+      el.style.color = '#4ade80';
+    } else {
+      el.style.color = '#d1d5db';
+    }
+    el.textContent = entry;
+    body.appendChild(el);
+  }
+  panel.appendChild(body);
+  requestAnimationFrame(() => { body.scrollTop = body.scrollHeight; });
+  return panel;
+}
+
+// ─── Replay snapshot helpers ──────────────────────────────────────────────────
+function captureSnapshot(label: string): void {
+  replaySnapshots.push({
+    phase:                state.phase,
+    pot:                  state.pot,
+    communityCards:       [...state.communityCards],
+    players:              state.players.map(p => ({
+      id: p.id, name: p.name, chips: p.chips, roundBet: p.roundBet,
+      isFolded: p.isFolded, isAllIn: p.isAllIn, isBusted: p.isBusted,
+      isUser: p.isUser, holeCards: [...p.holeCards],
+    })),
+    actionLabel:          label,
+    dealerButtonPosition: state.dealerButtonPosition,
+    currentBet:           state.currentBet,
+  });
+}
+
+// ─── Session replay UI ────────────────────────────────────────────────────────
+function renderReplayUI(): HTMLElement {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.82);z-index:700;display:flex;align-items:center;justify-content:center;';
+
+  // Choose hand to view
+  const handNumbers = [...replayByHand.keys()].sort((a, b) => a - b);
+  if (handNumbers.length === 0) { replayMode = false; return overlay; }
+  const snapshots = replayByHand.get(handNumbers[replayMode ? handNumbers.indexOf(handNumbers[0]) : handNumbers.length - 1]) ?? [];
+
+  // inner panel
+  const panel = document.createElement('div');
+  panel.style.cssText = [
+    'background:rgba(8,14,26,0.98);border:1px solid rgba(255,255,255,0.14);',
+    'border-radius:14px;padding:20px;width:520px;max-height:90vh;overflow-y:auto;',
+    'box-shadow:0 12px 48px rgba(0,0,0,0.7);',
+  ].join('');
+
+  // Title + hand selector
+  const titleRow = document.createElement('div');
+  titleRow.style.cssText = 'display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;';
+  const title = document.createElement('div');
+  title.style.cssText = 'color:#fbbf24;font-size:14px;font-weight:700;letter-spacing:1px;';
+  title.textContent = '⏪ SESSION REPLAY';
+
+  const handSel = document.createElement('select');
+  handSel.style.cssText = 'background:#1f2937;border:1px solid #374151;color:#e5e7eb;border-radius:6px;padding:4px 8px;font-size:11px;cursor:pointer;';
+  handNumbers.forEach(n => {
+    const rec = handHistory.find(h => h.handNum === n);
+    const opt = document.createElement('option');
+    opt.value = String(n);
+    opt.textContent = `Hand #${n}${rec ? ` — ${rec.winnerName} (${fmt(rec.potSize)})` : ''}`;
+    handSel.appendChild(opt);
+  });
+  // Default to last hand
+  handSel.value = String(handNumbers[handNumbers.length - 1]);
+  titleRow.appendChild(title); titleRow.appendChild(handSel);
+  panel.appendChild(titleRow);
+
+  // Get selected hand's snapshots
+  let currentSnaps = replayByHand.get(Number(handSel.value)) ?? [];
+  if (replayCursor >= currentSnaps.length) replayCursor = Math.max(0, currentSnaps.length - 1);
+  const snap = currentSnaps[replayCursor];
+
+  handSel.addEventListener('change', () => {
+    replayCursor = 0;
+    currentSnaps = replayByHand.get(Number(handSel.value)) ?? [];
+    render();
+  });
+
+  if (!snap) { panel.innerHTML += '<div style="color:#6b7280;font-size:12px;">No replay data.</div>'; overlay.appendChild(panel); return overlay; }
+
+  // Step info
+  const stepInfo = document.createElement('div');
+  stepInfo.style.cssText = 'background:rgba(255,255,255,0.05);border-radius:8px;padding:8px 12px;margin-bottom:12px;';
+  stepInfo.innerHTML = `
+    <div style="color:#9ca3af;font-size:10px;letter-spacing:0.8px;text-transform:uppercase;">Step ${replayCursor + 1} / ${currentSnaps.length}</div>
+    <div style="color:#e5e7eb;font-size:13px;font-weight:600;margin-top:4px;">${snap.actionLabel}</div>
+    <div style="color:#6b7280;font-size:11px;margin-top:2px;text-transform:capitalize;">${snap.phase} — Pot: <span style="color:#fbbf24;">${fmt(snap.pot)}</span> — Bet: <span style="color:#9ca3af;">${fmt(snap.currentBet)}</span></div>`;
+  panel.appendChild(stepInfo);
+
+  // Community cards
+  if (snap.communityCards.length > 0) {
+    const commRow = document.createElement('div');
+    commRow.style.cssText = 'display:flex;gap:6px;margin-bottom:12px;align-items:center;';
+    const commLbl = document.createElement('span');
+    commLbl.style.cssText = 'font-size:10px;color:#6b7280;width:48px;flex-shrink:0;';
+    commLbl.textContent = 'Board:';
+    commRow.appendChild(commLbl);
+    snap.communityCards.forEach(c => {
+      const cd = document.createElement('div');
+      const red = c.suit === 'hearts' || c.suit === 'diamonds';
+      cd.style.cssText = `width:34px;height:48px;background:#fff;border-radius:4px;border:1px solid #ccc;display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:${red ? '#dc2626' : '#1e1e1e'};`;
+      cd.innerHTML = `<div>${c.rank}</div><div>${getSuitSymbol(c.suit)}</div>`;
+      commRow.appendChild(cd);
+    });
+    panel.appendChild(commRow);
+  }
+
+  // Players
+  const playersDiv = document.createElement('div');
+  playersDiv.style.cssText = 'display:flex;flex-direction:column;gap:4px;margin-bottom:14px;';
+  snap.players.filter(p => !p.isBusted).forEach(p => {
+    const row = document.createElement('div');
+    const isDealer = snap.dealerButtonPosition === p.id;
+    row.style.cssText = [
+      'display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:6px;',
+      p.isFolded ? 'background:rgba(239,68,68,0.07);opacity:0.6;' :
+      p.isUser   ? 'background:rgba(37,99,235,0.15);border:1px solid rgba(96,165,250,0.3);' :
+      'background:rgba(255,255,255,0.04);',
+    ].join('');
+    const nameBadge = `<span style="color:${p.isUser ? '#60a5fa' : '#e5e7eb'};font-size:11px;font-weight:600;">${p.name}</span>`;
+    const dealerBadge = isDealer ? '<span style="background:#f59e0b;color:#000;font-size:8px;font-weight:700;padding:1px 4px;border-radius:3px;margin-left:3px;">D</span>' : '';
+    const chipsTxt = `<span style="color:#fbbf24;font-size:11px;margin-left:auto;">${fmt(p.chips)}</span>`;
+    const statusBadge = p.isAllIn ? '<span style="color:#f97316;font-size:9px;font-weight:700;margin-left:4px;">ALL-IN</span>' :
+                        p.isFolded ? '<span style="color:#ef4444;font-size:9px;">FOLDED</span>' : '';
+    const betTxt = p.roundBet > 0 ? `<span style="color:#9ca3af;font-size:9px;">(bet ${fmt(p.roundBet)})</span>` : '';
+
+    // Hole cards
+    let holePart = '';
+    if (p.holeCards.length === 2) {
+      holePart = p.holeCards.map(c => {
+        const red = c.suit === 'hearts' || c.suit === 'diamonds';
+        return `<span style="display:inline-flex;align-items:center;justify-content:center;width:22px;height:30px;background:#fff;border-radius:3px;border:1px solid #ccc;font-size:9px;font-weight:700;color:${red ? '#dc2626' : '#111'};flex-direction:column;gap:0;">${c.rank}${getSuitSymbol(c.suit)}</span>`;
+      }).join(' ');
+    }
+    row.innerHTML = `${nameBadge}${dealerBadge}${statusBadge}${betTxt}${holePart}${chipsTxt}`;
+    playersDiv.appendChild(row);
+  });
+  panel.appendChild(playersDiv);
+
+  // Navigation
+  const navRow = document.createElement('div');
+  navRow.style.cssText = 'display:flex;gap:8px;justify-content:center;';
+  const mkNavBtn = (label: string, disabled: boolean, onClick: () => void) => {
+    const b = document.createElement('button');
+    b.style.cssText = `background:${disabled ? '#1f2937' : '#1e3a5f'};border:1px solid ${disabled ? '#374151' : '#1e40af'};color:${disabled ? '#4b5563' : '#93c5fd'};border-radius:8px;padding:8px 18px;font-size:12px;cursor:${disabled ? 'default' : 'pointer'};`;
+    b.textContent = label; b.disabled = disabled;
+    b.addEventListener('click', onClick);
+    return b;
+  };
+  navRow.appendChild(mkNavBtn('◀ Prev', replayCursor === 0, () => { replayCursor--; render(); }));
+  navRow.appendChild(mkNavBtn('Next ▶', replayCursor >= currentSnaps.length - 1, () => { replayCursor++; render(); }));
+  const closeBtn = document.createElement('button');
+  closeBtn.style.cssText = 'background:#3b1212;border:1px solid #7f1d1d;color:#f87171;border-radius:8px;padding:8px 18px;font-size:12px;cursor:pointer;margin-left:8px;';
+  closeBtn.textContent = '✕ Close';
+  closeBtn.addEventListener('click', () => { replayMode = false; replayCursor = 0; render(); });
+  navRow.appendChild(closeBtn);
+  panel.appendChild(navRow);
+
+  overlay.appendChild(panel);
+  return overlay;
+}
+
+// ─── Equity calculator ────────────────────────────────────────────────────────
+function renderEquityCalcModal(): HTMLElement {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.78);z-index:650;display:flex;align-items:center;justify-content:center;';
+  overlay.addEventListener('click', e => { if (e.target === overlay) { equityCalcOpen = false; render(); } });
+
+  const panel = document.createElement('div');
+  panel.style.cssText = [
+    'background:rgba(8,14,26,0.98);border:1px solid rgba(255,255,255,0.14);',
+    'border-radius:14px;padding:20px 24px;width:460px;',
+    'box-shadow:0 12px 48px rgba(0,0,0,0.7);',
+  ].join('');
+
+  const title = document.createElement('div');
+  title.style.cssText = 'color:#fbbf24;font-size:14px;font-weight:700;letter-spacing:1px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;';
+  title.innerHTML = '🧮 EQUITY CALCULATOR<span style="font-size:11px;color:#6b7280;cursor:pointer;" id="eq-close">✕</span>';
+  title.querySelector('#eq-close')!.addEventListener('click', () => { equityCalcOpen = false; render(); });
+  panel.appendChild(title);
+
+  const RANKS = ['A','K','Q','J','10','9','8','7','6','5','4','3','2'];
+  const SUITS = [['spades','♠'],['hearts','♥'],['diamonds','♦'],['clubs','♣']] as [string,string][];
+
+  const mkCardSel = (entry: EquityCalcEntry, onChange: () => void): HTMLElement => {
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'display:flex;gap:3px;align-items:center;';
+    const ssel = (opts: string[][], val: string, key: 'rank'|'suit') => {
+      const s = document.createElement('select');
+      s.style.cssText = 'background:#1f2937;border:1px solid #374151;color:#e5e7eb;border-radius:5px;padding:3px 5px;font-size:12px;cursor:pointer;';
+      const empty = document.createElement('option'); empty.value = ''; empty.textContent = '–'; s.appendChild(empty);
+      opts.forEach(([v, l]) => {
+        const o = document.createElement('option'); o.value = v; o.textContent = l;
+        if (v === val) o.selected = true;
+        s.appendChild(o);
+      });
+      s.addEventListener('change', () => { entry[key] = s.value; onChange(); });
+      return s;
+    };
+    wrap.appendChild(ssel(RANKS.map(r => [r, r]), entry.rank, 'rank'));
+    wrap.appendChild(ssel(SUITS.map(([v, l]) => [v, l]), entry.suit, 'suit'));
+    return wrap;
+  };
+
+  const mkHandRow = (label: string, hand: [EquityCalcEntry, EquityCalcEntry], color: string) => {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;gap:10px;margin-bottom:10px;';
+    const lbl = document.createElement('div');
+    lbl.style.cssText = `color:${color};font-size:11px;font-weight:600;width:56px;flex-shrink:0;`;
+    lbl.textContent = label;
+    row.appendChild(lbl);
+    row.appendChild(mkCardSel(hand[0], () => { equityCalcResult = null; render(); }));
+    const sep = document.createElement('span');
+    sep.style.cssText = 'color:#4b5563;font-size:12px;';
+    sep.textContent = '–';
+    row.appendChild(sep);
+    row.appendChild(mkCardSel(hand[1], () => { equityCalcResult = null; render(); }));
+    return row;
+  };
+
+  panel.appendChild(mkHandRow('Hand 1', equityCalcInputs.hand1, '#4ade80'));
+  panel.appendChild(mkHandRow('Hand 2', equityCalcInputs.hand2, '#f87171'));
+
+  const boardLbl = document.createElement('div');
+  boardLbl.style.cssText = 'color:#9ca3af;font-size:10px;font-weight:600;letter-spacing:0.8px;text-transform:uppercase;margin-bottom:6px;margin-top:4px;';
+  boardLbl.textContent = 'Board (optional — 0–5 cards)';
+  panel.appendChild(boardLbl);
+
+  const boardRow = document.createElement('div');
+  boardRow.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px;';
+  equityCalcInputs.board.forEach(entry => boardRow.appendChild(mkCardSel(entry, () => { equityCalcResult = null; render(); })));
+  panel.appendChild(boardRow);
+
+  // Calculate button
+  const calcBtn = document.createElement('button');
+  calcBtn.style.cssText = 'background:linear-gradient(135deg,#1d4ed8,#3b82f6);border:1px solid #1e40af;color:#fff;border-radius:8px;padding:10px 24px;font-size:13px;font-weight:600;cursor:pointer;width:100%;margin-bottom:14px;';
+  calcBtn.textContent = '⚡ Calculate Equity';
+  calcBtn.addEventListener('click', () => {
+    const toCard = (e: EquityCalcEntry): Card | null => {
+      if (!e.rank || !e.suit) return null;
+      const vals: Record<string, number> = {'2':2,'3':3,'4':4,'5':5,'6':6,'7':7,'8':8,'9':9,'10':10,'J':11,'Q':12,'K':13,'A':14};
+      return { rank: e.rank as any, suit: e.suit as any, value: vals[e.rank] ?? 0 };
+    };
+    const h1 = [toCard(equityCalcInputs.hand1[0]), toCard(equityCalcInputs.hand1[1])].filter(Boolean) as Card[];
+    const h2 = [toCard(equityCalcInputs.hand2[0]), toCard(equityCalcInputs.hand2[1])].filter(Boolean) as Card[];
+    const board = equityCalcInputs.board.map(toCard).filter(Boolean) as Card[];
+    if (h1.length < 2 || h2.length < 2) { showToast('Enter both hands first'); return; }
+    equityCalcResult = calcHeadsUpEquity(h1, h2, board);
+    render();
+  });
+  panel.appendChild(calcBtn);
+
+  // Results
+  if (equityCalcResult) {
+    const { win1, win2, tie } = equityCalcResult;
+    const resWrap = document.createElement('div');
+    resWrap.style.cssText = 'background:rgba(255,255,255,0.04);border-radius:8px;padding:12px;';
+    // Bar
+    const bar = document.createElement('div');
+    bar.style.cssText = 'display:flex;border-radius:6px;overflow:hidden;height:22px;margin-bottom:8px;';
+    const seg = (pct: number, color: string) => {
+      const d = document.createElement('div');
+      d.style.cssText = `width:${pct}%;background:${color};display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#fff;transition:width 0.3s;`;
+      if (pct > 8) d.textContent = `${pct}%`;
+      return d;
+    };
+    bar.appendChild(seg(win1, '#22c55e'));
+    bar.appendChild(seg(tie, '#6b7280'));
+    bar.appendChild(seg(win2, '#ef4444'));
+    resWrap.appendChild(bar);
+    resWrap.innerHTML += `
+      <div style="display:flex;justify-content:space-between;font-size:11px;">
+        <span style="color:#4ade80;font-weight:700;">Hand 1: ${win1}%</span>
+        <span style="color:#9ca3af;">Tie: ${tie}%</span>
+        <span style="color:#f87171;font-weight:700;">Hand 2: ${win2}%</span>
+      </div>`;
+    panel.appendChild(resWrap);
+  }
+
+  overlay.appendChild(panel);
+  return overlay;
 }
 
 function playHandEndSounds(winnerIds: number[], userPlayer: Player): void {
@@ -1708,6 +2266,57 @@ function renderSettingsPanel(): HTMLElement {
   muckWrap.appendChild(muckChk); muckWrap.appendChild(muckLbl);
   panel.appendChild(muckWrap);
 
+  // Voice announcements toggle
+  const voiceWrap = document.createElement('div');
+  voiceWrap.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:10px;cursor:pointer;';
+  const voiceChk = document.createElement('input');
+  voiceChk.type = 'checkbox'; voiceChk.checked = voiceEnabled;
+  voiceChk.style.cssText = 'width:14px;height:14px;accent-color:#fbbf24;cursor:pointer;';
+  const voiceLbl = document.createElement('label');
+  voiceLbl.style.cssText = 'color:#9ca3af;font-size:11px;cursor:pointer;';
+  voiceLbl.textContent = '🗣 Voice announcements';
+  voiceChk.addEventListener('change', () => {
+    voiceEnabled = voiceChk.checked;
+    localStorage.setItem('voiceEnabled', String(voiceEnabled));
+    if (!voiceEnabled) window.speechSynthesis?.cancel();
+  });
+  voiceLbl.addEventListener('click', () => { voiceChk.click(); });
+  voiceWrap.appendChild(voiceChk); voiceWrap.appendChild(voiceLbl);
+  panel.appendChild(voiceWrap);
+
+  // Dynamic music toggle
+  const musicWrap = document.createElement('div');
+  musicWrap.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:10px;cursor:pointer;';
+  const musicChk = document.createElement('input');
+  musicChk.type = 'checkbox'; musicChk.checked = musicEnabled;
+  musicChk.style.cssText = 'width:14px;height:14px;accent-color:#fbbf24;cursor:pointer;';
+  const musicLbl = document.createElement('label');
+  musicLbl.style.cssText = 'color:#9ca3af;font-size:11px;cursor:pointer;';
+  musicLbl.textContent = '🎵 Dynamic music drone';
+  musicChk.addEventListener('change', () => {
+    musicEnabled = musicChk.checked;
+    localStorage.setItem('musicEnabled', String(musicEnabled));
+    if (musicEnabled) { startMusicDrone(); setMusicIntensity(_musicIntensity === 'idle' ? 'normal' : _musicIntensity); }
+    else stopMusicDrone();
+  });
+  musicLbl.addEventListener('click', () => { musicChk.click(); });
+  musicWrap.appendChild(musicChk); musicWrap.appendChild(musicLbl);
+  panel.appendChild(musicWrap);
+
+  // Equity calculator button
+  const eqBtn = document.createElement('button');
+  eqBtn.textContent = '🧮 Equity Calculator';
+  eqBtn.style.cssText = [
+    'width:100%;background:linear-gradient(135deg,#1e3a5f,#1e40af);',
+    'border:1px solid #1e40af;color:#93c5fd;border-radius:8px;',
+    'padding:7px;font-size:11px;cursor:pointer;margin-bottom:10px;',
+    'font-weight:600;letter-spacing:0.5px;',
+  ].join('');
+  eqBtn.addEventListener('click', () => {
+    equityCalcOpen = true; settingsOpen = false; render();
+  });
+  panel.appendChild(eqBtn);
+
   // Save / Load
   const saveRow = document.createElement('div');
   saveRow.style.cssText = 'display:flex;gap:6px;margin-top:4px;';
@@ -2255,15 +2864,33 @@ function render(): void {
       m.style.cssText = 'background:rgba(239,68,68,0.15);border:1px solid #ef4444;border-radius:8px;padding:5px 14px;color:#f87171;font-size:13px;font-weight:600;';
       m.textContent = "💸 You're out of chips!"; msgRow.appendChild(m);
       // New Game button directly in the actions area
+      const bustRow = document.createElement('div');
+      bustRow.style.cssText = 'display:flex;gap:8px;margin-top:6px;margin-bottom:20px;';
       const bustBtn = document.createElement('button');
       bustBtn.className = 'btn-action';
       bustBtn.style.cssText = [
         'background:linear-gradient(135deg,#7f1d1d,#dc2626);border-color:#b91c1c;',
-        'margin-top:6px;padding-bottom:12px;margin-bottom:20px;',
+        'padding-bottom:12px;',
       ].join('');
       bustBtn.textContent = 'New Game  ↺';
       bustBtn.addEventListener('click', newGame);
-      msgRow.appendChild(bustBtn);
+      bustRow.appendChild(bustBtn);
+      if (replayByHand.size > 0) {
+        const replayBtn = document.createElement('button');
+        replayBtn.className = 'btn-action';
+        replayBtn.style.cssText = [
+          'background:linear-gradient(135deg,#1e3a5f,#1e40af);border-color:#1e40af;',
+          'padding-bottom:12px;',
+        ].join('');
+        replayBtn.textContent = '⏪ Replay';
+        replayBtn.addEventListener('click', () => {
+          replayMode = true;
+          replayCursor = 0;
+          render();
+        });
+        bustRow.appendChild(replayBtn);
+      }
+      msgRow.appendChild(bustRow);
     } else if (gameOver) {
       const m = document.createElement('div');
       m.style.cssText = 'font-size:13px;color:#fbbf24;font-weight:600;';
@@ -2433,6 +3060,18 @@ function render(): void {
 
   canvas.appendChild(bottomHUD);
 
+  // ── Action log panel (bottom-left, above hand# badge) ────────────────────
+  if (gameStarted && state.phase !== 'idle') {
+    canvas.appendChild(renderActionLogPanel());
+  }
+
+  // ── Pot-odds arc (shown when it's the user's turn and facing a bet) ───────
+  if (isUserTurn && winOdds) {
+    const user2 = state.players.find(p => p.isUser)!;
+    const callAmt = Math.min(state.currentBet - user2.roundBet, user2.chips);
+    if (callAmt > 0) canvas.appendChild(renderPotOddsArc());
+  }
+
   // Deal Cards button
   if (state.phase === 'idle' && !dealingInProgress && !gameStarted) {
     const btn = document.createElement('button');
@@ -2447,6 +3086,12 @@ function render(): void {
     canvas.appendChild(btn);
   }
   app.appendChild(canvas);
+
+  // ── Equity calculator modal (overlays everything) ─────────────────────────
+  if (equityCalcOpen) app.appendChild(renderEquityCalcModal());
+
+  // ── Session replay overlay ────────────────────────────────────────────────
+  if (replayMode) app.appendChild(renderReplayUI());
 
   applyCanvasScale();
 }
@@ -2601,6 +3246,21 @@ async function runBettingRound(): Promise<boolean> {
       }
       if (action.type === 'fold') playCardFold();
 
+      // ── Action log + voice + replay ──
+      {
+        const callAmt = Math.max(0, state.currentBet - (state.players[next.id].roundBet - added));
+        const entry =
+          action.type === 'fold'  ? 'You fold' :
+          action.type === 'check' ? 'You check' :
+          action.type === 'call'  ? `You call ${fmt(callAmt > 0 ? callAmt : added)}` :
+          action.type === 'raise' ? `You raise to ${fmt(action.amount ?? added + (state.currentBet - next.roundBet))}` :
+          `You ALL-IN ${fmt(next.chips + added)}`;
+        handActionLog.push(entry);
+        if (action.type === 'allIn') speakText('All in!');
+        else if (action.type === 'raise') speakText(`Raise to ${fmt(action.amount ?? 0)}`);
+        captureSnapshot(entry);
+      }
+
       // Check achievements
       checkAchievements();
       render();
@@ -2626,6 +3286,20 @@ async function runBettingRound(): Promise<boolean> {
         animateChipsToPot(next.id, added);
       }
       if (action.type === 'fold') playCardFold();
+
+      // ── Action log + voice + replay ──
+      {
+        const aiEntry =
+          action.type === 'fold'  ? `${next.name} folds` :
+          action.type === 'check' ? `${next.name} checks` :
+          action.type === 'call'  ? `${next.name} calls ${fmt(added)}` :
+          action.type === 'raise' ? `${next.name} raises to ${fmt(action.amount ?? 0)}` :
+          `${next.name} ALL-IN ${fmt(next.chips + added)}`;
+        handActionLog.push(aiEntry);
+        if (action.type === 'allIn') speakText(`${next.name}, all in!`);
+        else if (action.type === 'raise') speakText(`${next.name} raises`);
+        captureSnapshot(aiEntry);
+      }
 
       // Speech bubble
       showSpeechBubble(next.id, action.type);
@@ -2709,6 +3383,7 @@ async function animateDealCards(): Promise<void> {
 
 // ─── Showdown ─────────────────────────────────────────────────────────────────
 async function doShowdown(): Promise<void> {
+  setMusicIntensity('showdown');
   const potBeforeAward = state.pot;
   state = evaluateHands(state);
   state = awardPot(state);
@@ -2716,7 +3391,11 @@ async function doShowdown(): Promise<void> {
   // ── Bust animation: detect players that just hit 0 chips ──────────────────
   const newlyBusted = state.players.filter(p => !p.isBusted && p.chips === 0);
   if (newlyBusted.length > 0) {
-    newlyBusted.forEach(p => { recentlyBustedIds.add(p.id); playSoundBust(); });
+    newlyBusted.forEach(p => {
+      recentlyBustedIds.add(p.id);
+      playSoundBust();
+      speakText(p.isUser ? 'You are out!' : `${p.name} is out!`);
+    });
     render();
     await sleep(700);
     newlyBusted.forEach(p => recentlyBustedIds.delete(p.id));
@@ -2810,6 +3489,17 @@ async function doShowdown(): Promise<void> {
     wentToShowdown: state.phase === 'showdown' && !user.isFolded,
   };
   postHandNotes = buildPostHandAnalysis(potBeforeAward, user, state);
+
+  // ── Action log: winner entry + voice ─────────────────────────────────────
+  const winnerEntry = state.winnerIds.includes(user.id)
+    ? `You win the pot! ${fmt(potBeforeAward)}`
+    : `${state.players[state.winnerIds[0]]?.name ?? 'Unknown'} wins the pot`;
+  handActionLog.push(winnerEntry);
+  speakText(state.winnerIds.includes(user.id) ? 'You win!' : `${state.players[state.winnerIds[0]]?.name ?? 'Unknown'} wins`);
+
+  // ── Save replay for this hand ─────────────────────────────────────────────
+  captureSnapshot(winnerEntry);
+  replayByHand.set(state.handNumber, [...replaySnapshots]);
 
   render(); // re-render so the teacher panel appears
 
@@ -3053,7 +3743,11 @@ async function endByFold(): Promise<void> {
   // ── Bust animation: detect players that just hit 0 chips ──────────────────
   const newlyBustedF = state.players.filter(p => !p.isBusted && p.chips === 0);
   if (newlyBustedF.length > 0) {
-    newlyBustedF.forEach(p => { recentlyBustedIds.add(p.id); playSoundBust(); });
+    newlyBustedF.forEach(p => {
+      recentlyBustedIds.add(p.id);
+      playSoundBust();
+      speakText(p.isUser ? 'You are out!' : `${p.name} is out!`);
+    });
     render();
     await sleep(700);
     newlyBustedF.forEach(p => recentlyBustedIds.delete(p.id));
@@ -3119,6 +3813,17 @@ async function endByFold(): Promise<void> {
   };
   postHandNotes = buildPostHandAnalysis(potBeforeAward, userFreshF, state);
 
+  // ── Action log: winner entry + voice ─────────────────────────────────────
+  const winnerFoldEntry = userWonFold
+    ? `You win the pot! ${fmt(potBeforeAward)}`
+    : `${winner.name} wins the pot (everyone folded)`;
+  handActionLog.push(winnerFoldEntry);
+  speakText(userWonFold ? 'You win!' : `${winner.name} wins`);
+
+  // ── Save replay for this hand ─────────────────────────────────────────────
+  captureSnapshot(winnerFoldEntry);
+  replayByHand.set(state.handNumber, [...replaySnapshots]);
+
   render(); // re-render so the teacher panel appears
 
   saveGame(state);
@@ -3153,8 +3858,13 @@ async function playHand(): Promise<void> {
   render();
   state.players.forEach((p, i) => {
     const added = p.roundBet - preBlindBets[i];
-    if (added > 0) animateChipsToPot(i, added);
+    if (added > 0) {
+      animateChipsToPot(i, added);
+      const role = added === state.bigBlind ? 'posts BB' : 'posts SB';
+      handActionLog.push(`${p.isUser ? 'You' : p.name} ${role} ${fmt(added)}`);
+    }
   });
+  captureSnapshot('Blinds posted');
   await sleep(500);
 
   await animateDealCards();
@@ -3175,6 +3885,13 @@ async function playHand(): Promise<void> {
   dealingInProgress = false;
   render();
   if (winOdds) equityHistory.push(winOdds.fair.equityPct);
+  { const cs = state.communityCards;
+    const flopStr = `Flop: ${cs.slice(0,3).map(c => `${c.rank}${getSuitSymbol(c.suit)}`).join(' ')}`;
+    handActionLog.push(flopStr);
+    captureSnapshot(flopStr);
+    const allIn = state.players.filter(p=>!p.isFolded&&!p.isBusted);
+    if (allIn.length > 1 && allIn.every(p=>p.isAllIn)) { setMusicIntensity('allin'); speakText('All in — running it out'); }
+  }
   if (!(await runBettingRound())) { await endByFold(); return; }
 
   // Turn
@@ -3185,6 +3902,13 @@ async function playHand(): Promise<void> {
   dealingInProgress = false;
   render();
   if (winOdds) equityHistory.push(winOdds.fair.equityPct);
+  { const tc = state.communityCards[3];
+    const turnStr = `Turn: ${tc.rank}${getSuitSymbol(tc.suit)}`;
+    handActionLog.push(turnStr);
+    captureSnapshot(turnStr);
+    const allIn = state.players.filter(p=>!p.isFolded&&!p.isBusted);
+    if (allIn.length > 1 && allIn.every(p=>p.isAllIn)) setMusicIntensity('allin');
+  }
   if (!(await runBettingRound())) { await endByFold(); return; }
 
   // River
@@ -3195,6 +3919,11 @@ async function playHand(): Promise<void> {
   dealingInProgress = false;
   render();
   if (winOdds) equityHistory.push(winOdds.fair.equityPct);
+  { const rc = state.communityCards[4];
+    const riverStr = `River: ${rc.rank}${getSuitSymbol(rc.suit)}`;
+    handActionLog.push(riverStr);
+    captureSnapshot(riverStr);
+  }
   if (!(await runBettingRound())) { await endByFold(); return; }
 
   await doShowdown();
@@ -3210,7 +3939,10 @@ function newHand(): void {
   handDecisions        = [];
   postHandNotes        = [];
   teacherCtx           = null;
+  handActionLog        = [];
+  replaySnapshots      = [];
   stopTimeBank();
+  setMusicIntensity('normal');
 
   state = initHand(state);
   revealedCards.clear();
@@ -3240,6 +3972,16 @@ function newGame(): void {
   showRabbit           = false;
   equityHistory        = [];
   settingsOpen         = false;
+  handActionLog        = [];
+  replaySnapshots      = [];
+  replayByHand.clear();
+  replayMode           = false;
+  replayCursor         = 0;
+  equityCalcOpen       = false;
+  equityCalcResult     = null;
+  _speechQueue.length  = 0;
+  window.speechSynthesis?.cancel();
+  setMusicIntensity('idle');
   stopTimeBank();
   render();
 }
@@ -3266,8 +4008,12 @@ document.addEventListener('click', () => startAmbientLoop(), { once: true });
 
 // ─── Keyboard shortcuts ───────────────────────────────────────────────────────
 window.addEventListener('keydown', (e: KeyboardEvent) => {
-  // Close settings on Escape
-  if (e.key === 'Escape' && settingsOpen) { settingsOpen = false; render(); return; }
+  // Close overlays on Escape
+  if (e.key === 'Escape') {
+    if (replayMode)      { replayMode = false; render(); return; }
+    if (equityCalcOpen)  { equityCalcOpen = false; render(); return; }
+    if (settingsOpen)    { settingsOpen = false; render(); return; }
+  }
 
   if (!isUserTurn || !userActionResolve) return;
   if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;

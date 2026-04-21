@@ -1,4 +1,4 @@
-import { Card } from './deck';
+import { Card, createDeck } from './deck';
 import { GameState } from './gameState';
 import { evaluateBestHand } from './handEvaluator';
 
@@ -194,6 +194,43 @@ export function calcWinOdds(state: GameState): WinOdds {
     // Count all non-folded, non-busted players (includes user)
     activePlayers: state.players.filter(p => !p.isFolded && !p.isBusted).length,
   };
+}
+
+// ─── Heads-up equity calculator (any two specific hands + optional board) ────
+/**
+ * Given two explicit 2-card hands and 0–5 board cards, run Monte Carlo to
+ * determine the probability each hand wins / ties.  Used by the equity calculator panel.
+ */
+export function calcHeadsUpEquity(
+  hand1: Card[], hand2: Card[], board: Card[], sims = 8000,
+): { win1: number; win2: number; tie: number } {
+  const knownKeys = new Set([...hand1, ...hand2, ...board].map(cardKey));
+  const pool      = createDeck().filter(c => !knownKeys.has(cardKey(c)));
+  const remaining = 5 - board.length;
+
+  // Fully-known board: deterministic
+  if (remaining === 0) {
+    const s1 = evaluateBestHand(hand1, board).score;
+    const s2 = evaluateBestHand(hand2, board).score;
+    if (s1 > s2) return { win1: 100, win2: 0,   tie: 0   };
+    if (s2 > s1) return { win1: 0,   win2: 100,  tie: 0   };
+    return                { win1: 0,   win2: 0,    tie: 100 };
+  }
+
+  if (pool.length < remaining) return { win1: 0, win2: 0, tie: 0 };
+
+  let w1 = 0, w2 = 0, t = 0;
+  for (let s = 0; s < sims; s++) {
+    const shuffled  = quickShuffle(pool);
+    const simBoard  = [...board, ...shuffled.slice(0, remaining)];
+    const s1        = evaluateBestHand(hand1, simBoard).score;
+    const s2        = evaluateBestHand(hand2, simBoard).score;
+    if      (s1 > s2) w1++;
+    else if (s2 > s1) w2++;
+    else              t++;
+  }
+  const r = (n: number) => Math.round(n / sims * 1000) / 10; // one decimal
+  return { win1: r(w1), win2: r(w2), tie: r(t) };
 }
 
 // ─── AI equity: all active players ───────────────────────────────────────────

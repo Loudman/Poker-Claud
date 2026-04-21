@@ -2,7 +2,7 @@
 
 > **GOD MODE EDITION — Becoming a Gran Master**
 
-A fully-featured Texas Hold'em poker simulator built with **Electron**, **TypeScript**, and **TailwindCSS v4**. Designed as a single-page, offline desktop game with a fixed-canvas layout, multi-archetype AI opponents, real-time equity calculation, rich visual/audio feedback, XP progression, daily challenges, persistent save state, and a post-hand **Poker Teacher** analysis panel.
+A fully-featured Texas Hold'em poker simulator built with **Electron**, **TypeScript**, and **TailwindCSS v4**. Designed as a single-page, offline desktop game with a fixed-canvas layout, multi-archetype AI opponents, real-time equity calculation, rich visual/audio feedback, XP progression, daily challenges, persistent save state, a post-hand **Poker Teacher** analysis panel, an **Equity Calculator**, a live **Action Log**, **Session Replay**, a **Live Pot Odds Arc**, and **Voice Announcements**.
 
 ---
 
@@ -32,6 +32,12 @@ A fully-featured Texas Hold'em poker simulator built with **Electron**, **TypeSc
 - [Animation System](#animation-system)
 - [Audio System](#audio-system)
 - [UI Panels & Controls](#ui-panels--controls)
+- [Equity Calculator](#equity-calculator)
+- [Action Log Panel](#action-log-panel)
+- [Session Replay](#session-replay)
+- [Live Pot Odds Arc](#live-pot-odds-arc)
+- [Voice Announcements](#voice-announcements)
+- [Dynamic Music Drone](#dynamic-music-drone)
 - [Poker Teacher Analysis](#poker-teacher-analysis)
 - [Progression & Achievements](#progression--achievements)
 - [Statistics Tracking](#statistics-tracking)
@@ -52,9 +58,10 @@ A fully-featured Texas Hold'em poker simulator built with **Electron**, **TypeSc
 | Bundler | Webpack 5 (3 separate configs for main, preload, renderer) |
 | Styling | TailwindCSS v4 + custom CSS (animations, 3D effects) |
 | Randomness | `crypto.getRandomValues` (CSPRNG) for deck shuffles |
-| Audio | Web Audio API (no external audio files — all generated programmatically) |
-| Equity | Monte Carlo simulation (up to 2,500 iterations) |
-| Persistence | `localStorage` (save/resume, card back preference, daily challenge) |
+| Audio | Web Audio API + optional `.ogg` file-based overrides (copied to dist via `CopyPlugin`) |
+| Equity | Monte Carlo simulation (up to 2,500 iterations); heads-up equity via `calcHeadsUpEquity` |
+| Voice | Web Speech API (`SpeechSynthesisUtterance`) |
+| Persistence | `localStorage` (save/resume, card back preference, daily challenge, voice/music settings) |
 
 ---
 
@@ -67,15 +74,17 @@ src/
 ├── preload/
 │   └── preload.ts               # Context bridge (contextIsolation: true)
 └── renderer/
-    ├── index.ts                 # Full UI engine (~3,400+ lines)
+    ├── index.ts                 # Full UI engine (~3,700+ lines)
     ├── index.html               # Single-div shell
     ├── styles.css               # TailwindCSS import + custom keyframes/classes
     ├── assets.d.ts              # PNG asset type declarations
+    ├── assets/
+    │   └── audio/               # Optional .ogg sound files (copied to dist by CopyPlugin)
     └── game/
         ├── deck.ts              # Card types, CSPRNG shuffle, suit/rank utilities
         ├── gameState.ts         # Full game state model, blind logic, bet application
         ├── bettingAI.ts         # Multi-archetype AI decision engine
-        └── winProbability.ts    # Monte Carlo equity + position/fold probability
+        └── winProbability.ts    # Monte Carlo equity + heads-up equity + position/fold probability
 ```
 
 ---
@@ -104,7 +113,7 @@ The single exception is the **`#anim-layer`** — a `position:fixed` overlay app
 
 ### State Architecture
 
-All game state lives in a single **`GameState`** object (defined in `gameState.ts`). UI-only state (deck panel expanded, history panel expanded, thinking player ID, user action resolver, per-hand teacher context, etc.) lives as module-level variables in `index.ts`. There is no external state library.
+All game state lives in a single **`GameState`** object (defined in `gameState.ts`). UI-only state (deck panel expanded, history panel expanded, thinking player ID, user action resolver, per-hand teacher context, action log, replay snapshots, etc.) lives as module-level variables in `index.ts`. There is no external state library.
 
 ---
 
@@ -209,6 +218,8 @@ When exactly 2 players remain, standard heads-up rules apply:
 Main pot  → eligible: all non-folded players
 Side pot  → eligible: players who matched the all-in amount
 ```
+
+A player is only added to `allWinnerIds` for **contested pots** (`eligible.length > 1`) or fold-win paths. Single-eligible pots (uncovered chip refunds) are awarded silently without advertising the recipient as a winner.
 
 ### Winner Banner Disambiguation
 
@@ -382,6 +393,10 @@ Two simulation modes are used:
 - River: 1 deterministic evaluation (no sampling needed)
 - Returns `Map<playerId, equityFraction>`
 
+**`calcHeadsUpEquity(hand1, hand2, board, sims)`** — for the Equity Calculator:
+- Runs up to 8,000 simulations for two specific hole card combinations against an optional partial board
+- Returns `{ win1, win2, tie }` as percentages
+
 ### Metrics Reported
 
 - **`winPct`**: percentage of simulations where the user wins outright
@@ -522,27 +537,31 @@ When a player's chip count reaches 0 after `awardPot()`, they are added to `rece
 }
 ```
 
-The bust sound plays simultaneously. After 700ms the class is removed and the player disappears at `initHand` as normal.
+The bust sound plays simultaneously. After 700ms the class is removed and the player's name panel disappears entirely (busted players return an empty div from `renderPlayerInfo`).
 
 ---
 
 ## Audio System
 
-All audio is synthesised via the **Web Audio API** — no audio files are loaded or bundled. Audio routes through a `DynamicsCompressorNode` → `_masterGain` → `AudioContext.destination`, and the master gain is adjustable in the settings panel.
+Audio routes through a `DynamicsCompressorNode` → `_masterGain` → `AudioContext.destination`. The master gain is adjustable in the settings panel.
 
-Optional replacement audio files can be dropped into `src/renderer/assets/audio/`. See that directory's `README.md` for expected filenames and supported formats (`ogg → mp3 → wav` fallback chain).
+**File-based sounds** (optional `.ogg` overrides) are copied from `src/renderer/assets/audio/` to `dist/renderer/assets/audio/` at build time via Webpack `CopyPlugin`. At runtime, `tryBufPick()` attempts to fetch and decode each file; if unavailable, synthesis fallbacks are used automatically.
 
-| Sound | Trigger | Description |
+**Ambient sounds** (crowd murmur noise loop + occasional chip handle sounds) only play while a hand is actively in progress (`gameStarted && phase !== 'idle'`). They are silent on the lobby/idle screen.
+
+| Sound | Trigger | Method |
 |---|---|---|
-| Card shuffle | Before dealing | 8–9 rapid clicks, 800–1200Hz, 30ms each |
-| Chip click | Every bet/call/raise | 1200Hz triangle wave, 20ms |
-| User win | User wins hand | Ascending C5→E5→G5→C6→E6 arpeggio |
+| Card shuffle | Before dealing | `.ogg` file (`card-fan-1/2`) → synthesis fallback |
+| Card deal | Each card dealt | `.ogg` file (`card-deal-*`) → synthesis fallback |
+| Chip click | Every bet/call/raise | `.ogg` file (`chips-stack-*`) → synthesis fallback |
+| Card fold | Player folds | Synthesis only (highpass noise burst) |
+| User win | User wins hand | Ascending arpeggio (C5→E5→G5→C6→E6) |
 | Other win | AI wins | Two-note ding (A5, C6) |
-| Tie / split pot | Genuine pot split | Dual chip clinks 120ms apart (680Hz + 900Hz) |
+| Tie / split pot | Genuine pot split | Dual chip clinks 120ms apart |
 | Bust | Player eliminated | Descending sawtooth G4→E4→C4→G3 |
 | Big win cheer | User wins pot > 50K | Ascending noise burst |
-| Time bank tick | ≤ 5 seconds remaining | 880Hz square-wave click each second |
-| Ambient casino | First user interaction | Low-pass filtered noise loop + randomised chip sounds, runs continuously in background |
+| Time bank tick | ≤ 5 seconds remaining | 880Hz square-wave click each second (synthesis only) |
+| Ambient casino | During active hand | Low-pass filtered noise loop + randomised chip sounds |
 
 ---
 
@@ -632,26 +651,15 @@ Shows all 52 cards in shuffled deck order, colour-coded:
 - 🔴 Red: burned cards
 - ⬜ Grey: remaining in deck
 
-> **Note**: The separate Burned Cards panel was removed. All burn card information is visible in the Deck Order panel.
-
 ### Phase Indicator (bottom-right, above Deck panel)
 
-A row of step indicators showing the current street: Pre-Flop → Flop → Turn → River → Showdown. Highlighted in gold for the active phase. Stacked above the Deck panel with a consistent gap to avoid overlap.
+A row of step indicators showing the current street: Pre-Flop → Flop → Turn → River → Showdown. Highlighted in gold for the active phase.
 
 ### Hand History Panel (collapsible, bottom-right, above Phase Indicator)
 
-Stores the last 5 completed hands, stacked above the Phase Indicator:
+Stores the last 5 completed hands:
 - Hand number, winner name, winning hand description, pot size
 - User wins highlighted in gold
-
-The bottom offset is computed dynamically:
-```
-bottomOffset = 12 + deckPanelHeight + 8 + phaseRowHeight + 8
-```
-
-### Hand Number Badge (top-left)
-
-Displays the current hand number. Positioned at the top-left of the canvas to avoid overlap with right-side panels.
 
 ### Session Dashboard
 
@@ -659,6 +667,108 @@ Shown at game end (user busts or wins the tournament). Displays a 3-column stats
 
 | Hands Played | Hands Won | Win Rate |
 | Best Pot | Net Chips | Level |
+
+When the user busts and session replay data is available, a **⏪ Replay** button appears alongside the "New Game" button to step through past hands.
+
+---
+
+## Equity Calculator
+
+Accessible from the ⚙ Settings panel → **🧮 Equity Calculator** button (also closeable with `Escape`).
+
+A modal overlay with:
+- **Hand 1** — two rank/suit select dropdowns
+- **Hand 2** — two rank/suit select dropdowns
+- **Board** — up to 5 optional community card inputs (Flop/Turn/River)
+- **Calculate** button — runs `calcHeadsUpEquity()` (8,000 Monte Carlo simulations)
+- **Results bar** — colour-split bar showing Win %, Tie %, and loss % for each hand
+
+Useful for studying specific hand matchups (e.g. A♠K♦ vs K♥K♣ on a dry flop) independently of the live game.
+
+---
+
+## Action Log Panel
+
+A collapsible panel in the **bottom-left** of the canvas, visible whenever a hand is in progress.
+
+Records every action of the current hand in chronological order:
+- Blind posts: *"You post BB $2,000"*
+- Player actions: *"You raise $6,000"*, *"Eli calls $6,000"*, *"Marco folds"*
+- Street markers: *"Flop: A♠ K♦ 3♣"*, *"Turn: 7♥"*, *"River: Q♠"*
+- Winner: *"You win the pot! $18,400"*
+
+Entries are colour-coded (green for user wins, red for folds, white for neutral actions). The panel is scrollable when entries exceed the visible height and can be collapsed/expanded by clicking the header.
+
+The log resets at the start of each new hand.
+
+---
+
+## Session Replay
+
+After busting out, an **⏪ Replay** button appears if hand history was recorded during the session. Clicking it opens the **Session Replay overlay**.
+
+The overlay provides:
+- **Hand selector** — dropdown to jump to any recorded hand
+- **Step info** — current action label and snapshot index out of total
+- **Community cards** — the board state at the selected snapshot
+- **Player table** — all players' chip counts and status at that moment
+- **Navigation** — ◀ Prev / Next ▶ buttons to step through snapshots
+- **Close** button (or press `Escape`)
+
+Snapshots (`ReplaySnapshot`) are captured after every action (bet, fold, raise, street deal, blind post) and stored in `replayByHand: Map<handNumber, ReplaySnapshot[]>`. The map is cleared on New Game.
+
+---
+
+## Live Pot Odds Arc
+
+When it is the user's turn **and** they face a bet (call amount > 0), a **104×104px SVG arc** appears on the canvas:
+
+- **Green arc** — fills proportionally to the user's current equity percentage
+- **Gold dashed line** — marks the pot-odds break-even threshold
+- **Centre label** — shows equity % and pot-odds % numerically
+
+If the green arc reaches or passes the gold line, the call is +EV. This gives an immediate visual read without having to parse the text pot-odds row in the action panel.
+
+---
+
+## Voice Announcements
+
+Uses the browser's **Web Speech API** (`SpeechSynthesisUtterance`) to speak key game events aloud. Enabled by default; can be toggled in Settings.
+
+**What is announced:**
+
+| Event | Announcement |
+|---|---|
+| You go all-in | *"All in!"* |
+| You raise | *"Raise to $X"* |
+| Opponent goes all-in | *"[Name], all in!"* |
+| Opponent raises | *"[Name] raises"* |
+| You win the hand | *"You win!"* |
+| Opponent wins the hand | *"[Name] wins"* |
+| All players all-in (run-out) | *"All in — running it out"* |
+
+**What is not announced:** folds, calls, checks, blinds, and board cards (Flop/Turn/River).
+
+Speech is queued to avoid overlap — each utterance waits for the previous to finish. Consecutive identical messages are de-duplicated.
+
+---
+
+## Dynamic Music Drone
+
+An optional ambient sub-bass drone built entirely with the Web Audio API. **Off by default**; can be enabled in Settings → 🎵 Dynamic music drone.
+
+Architecture:
+- **55 Hz sawtooth oscillator** → lowpass filter (180 Hz cutoff) → gain node → master output
+- **LFO** (0.08 Hz sine) modulates the gain for a slow tremolo effect
+
+Intensity levels change automatically based on game state:
+
+| Intensity | Trigger | Gain | LFO |
+|---|---|---|---|
+| `idle` | No active hand | Ramps to 0 (drone stops) | — |
+| `normal` | Hand in progress | 0.050 | 0.08 Hz |
+| `allin` | All players all-in | 0.10 | 0.55 Hz (faster pulse) |
+| `showdown` | Showdown reached | Swells to 0.16 then fades back | — |
 
 ---
 
@@ -707,26 +817,6 @@ For each recorded decision, the teacher applies the following rules:
 | No mistakes found, went to showdown | "Clean hand" | ✅ or 📖 |
 
 The **pre-flop hand strength note** is always prepended as the first note, even when no mistakes were made. It shows the hole cards, the strength category, and a brief coaching tip on how to play that class of hand.
-
-### Teacher Panel UI
-
-The panel uses a dark gradient card with an indigo border:
-
-```
-┌───────────────────────────────────────────┐
-│ 🎓 POKER TEACHER                  A♠ K♦  │
-├───────────────────────────────────────────┤
-│ ❌  Flop: –EV call                        │
-│    You called needing 42% equity but had  │
-│    ~28%. Over time these calls lose money. │
-├───────────────────────────────────────────┤
-│ 💡  Missed c-bet opportunity              │
-│    As the pre-flop aggressor you should   │
-│    c-bet ~60% pot to deny equity.         │
-└───────────────────────────────────────────┘
-```
-
-Each note card has a **colour-coded left border** (red = mistake, green = correct, amber = tip) with a bold **headline** and a plain-English **detail explanation**. The user's hole cards are shown in the panel header for context.
 
 ### Coverage
 
@@ -861,11 +951,23 @@ Four card back colour themes, selectable via a 2×2 grid:
 | 🟢 Green | `repeating-linear-gradient(45deg, #14532d …)` |
 | 🟣 Purple | `repeating-linear-gradient(45deg, #581c87 …)` |
 
-The selected theme is persisted in `localStorage` under the key `cardBack` and applied to all face-down cards immediately.
+The selected theme is persisted in `localStorage` under the key `cardBack`.
 
 ### Muck Losing Hands
 
-A checkbox toggle — **Muck losing hands** — hides AI opponents' losing hole cards at showdown, replacing them with face-down card backs and a "mucked" label. This mirrors real-world etiquette where the losing player mucks without showing. The setting is persisted in `localStorage` under the key `muckLosers`.
+A checkbox toggle hides AI opponents' losing hole cards at showdown. Persisted in `localStorage` under `muckLosers`.
+
+### Voice Announcements
+
+Toggles the Web Speech API voice announcements. **On by default.** Persisted in `localStorage` under `voiceEnabled`.
+
+### Dynamic Music Drone
+
+Toggles the sub-bass ambient music drone. **Off by default.** Persisted in `localStorage` under `musicEnabled`.
+
+### Equity Calculator
+
+Opens the **🧮 Equity Calculator** modal directly from Settings.
 
 ### Save / Load / Clear
 
@@ -885,6 +987,12 @@ When it is the user's turn, the following keys are active:
 | `C` | Check (if free) or Call |
 | `R` | Raise (submits current raise input amount) |
 | `A` | All-in |
+
+Global shortcuts (always active):
+
+| Key | Action |
+|---|---|
+| `Escape` | Close replay overlay → equity calculator → settings (priority order) |
 
 Keyboard hints are shown in the bottom row of the action panel.
 
@@ -939,6 +1047,8 @@ Simulation counts in `winProbability.ts`:
 ```typescript
 const SIM_COUNTS = { preflop: 2500, flop: 1800, turn: 1200 };
 const FOLD_SIMS  = 800;   // AI equity decisions
+// Equity Calculator
+const HEADSUP_SIMS = 8000;
 ```
 
 ---
@@ -949,14 +1059,17 @@ const FOLD_SIMS  = 800;   // AI equity decisions
 - **Single GameState object** — carries all session state including stats, user profile, daily challenge and XP/level. Easy to snapshot for save/resume.
 - **`localStorage` persistence** — no server or file system APIs needed. Save/load is instant and survives Electron restarts.
 - **`#anim-layer` persistence** — chip and confetti animations survive `render()` by living in `document.body` outside the canvas.
-- **Procedural audio only** — zero audio file dependencies; all sounds are Web Audio oscillators/noise, keeping the bundle clean. Optional file-based overrides are supported.
+- **Hybrid audio** — Web Audio synthesis for all core sounds with optional `.ogg` file overrides copied to `dist/` by `CopyPlugin`. Ambient sounds gate on `gameStarted && phase !== 'idle'` to avoid noise on the lobby screen.
 - **GTO-inspired AI** — AI combines equity thresholds, position-aware open ranges, board texture sizing, short-stack push/fold, and opponent profiling for a realistic and adaptive challenge.
 - **CSPRNG shuffle** — `crypto.getRandomValues` ensures the deck shuffle is not predictable from timing or seed attacks.
 - **Rabbit hunting non-destructive** — peeking at future cards copies and slices the deck array without mutating live game state, so the hand can always continue normally.
 - **Side pot carryover** — `buildSidePots()` uses a `carryover` accumulator so chips from folded all-in players are never silently dropped; they roll into the next eligible pot.
-- **splitPotWinnerIds vs winnerIds** — `winnerIds` may contain multiple players who each won a *different* side pot; `splitPotWinnerIds` tracks only genuine same-pot ties, ensuring the "TIE!" badge is never shown incorrectly.
+- **splitPotWinnerIds vs winnerIds** — `winnerIds` may contain multiple players who each won a *different* side pot; `splitPotWinnerIds` tracks only genuine same-pot ties, ensuring the "TIE!" badge is never shown incorrectly. Single-eligible pots (chip refunds) are awarded silently without marking the recipient as a winner.
 - **Poker Teacher panel** — every decision is tracked with equity and pot-odds context so the post-hand analysis can give specific, actionable feedback rather than generic tips. The first note always shows the pre-flop hand category (Premium → Trash) with coaching on how to play that class of hand.
 - **Winner banner disambiguation** — three distinct banner styles (tie/split-pot, multi-pot, solo) plus a 1v1 side-by-side hand comparison eliminate ambiguity at showdown.
 - **Best-hand card glow** — `HandResult.bestHand` is matched against `data-rank`/`data-suit` DOM attributes to highlight exactly the 5 cards forming the winning combination, across both hole and community cards.
-- **Ambient casino audio** — a continuous low-pass noise loop with randomised chip sounds starts on first user interaction (satisfying the AudioContext autoplay policy) and runs for the duration of the session.
+- **Action log** — every hand action is recorded in real time to a collapsible bottom-left panel, giving the user a full audit trail of the hand as it unfolds.
+- **Session replay** — `ReplaySnapshot` objects are captured after every action and stored in `replayByHand`. After busting, the player can step through the entire session hand-by-hand to review decisions.
+- **Voice announcements** — Web Speech API announces key moments (all-ins, raises, winner) without narrating board cards, keeping it informative but not intrusive. On by default.
+- **Dynamic music** — off by default to avoid unexpected audio. When enabled, a sub-bass drone changes intensity (idle → normal → all-in → showdown) to heighten tension at key moments.
 - **Muck losing hands** — an optional setting hides AI losing hole cards at showdown, matching real-world table etiquette, persisted in `localStorage`.

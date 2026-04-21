@@ -25,7 +25,8 @@
       "Bash(cp \"/Users/rfigueiredo/Desktop/Screenshot 2026-04-20 at 21.40.17.png\" /Users/rfigueiredo/code/tests/electron/poker1/screenshots/poker-teacher.png)",
       "Bash(pkill -f \"electron/dist/Electron\")",
       "Bash(pkill -f \"poker1.*electron\")",
-      "Bash(pkill -f \"poker1.*Electron\")"
+      "Bash(pkill -f \"poker1.*Electron\")",
+      "Bash(npm --prefix /Users/rfigueiredo/code/tests/electron/poker1 start)"
     ]
   }
 }

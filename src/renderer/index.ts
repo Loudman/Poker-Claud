@@ -51,6 +51,8 @@ let dealingInProgress     = false;
 let holeCardDealInProgress = false;
 let winOdds: WinOdds | null = null;
 let lastOddsPhase = '';
+let allInEquities: Map<number, number> | null = null;
+let lastAllInPhase = '';
 let revealedCards: Set<string> = new Set();
 let thinkingPlayerId: number | null = null;
 let lastActionResult: { id: number; label: string; color: string } | null = null;
@@ -461,6 +463,81 @@ function animateChipsToWinner(winnerId: number, potAmount: number): void {
     });
     setTimeout(() => tokens.forEach(t => t.remove()), 650);
   }));
+}
+
+// ─── Champion celebration (continuous coins + confetti) ───────────────────────
+let _champInterval: ReturnType<typeof setInterval> | null = null;
+
+function startChampionCelebration(): void {
+  if (_champInterval) return; // already running
+
+  const CONFETTI_COLORS = [
+    '#fbbf24','#f59e0b','#ef4444','#10b981','#3b82f6',
+    '#8b5cf6','#ec4899','#f97316','#06b6d4','#84cc16',
+  ];
+  const SYMBOLS = ['♠','♥','♦','♣','★','$'];
+
+  function spawnWave(): void {
+    const W = window.innerWidth;
+
+    // ── 3D coins ─────────────────────────────────────────────────────────────
+    for (let i = 0; i < 5; i++) {
+      const coin = document.createElement('div');
+      coin.className = 'champion-coin';
+      const dur  = 2.2 + Math.random() * 2.0;
+      const sway = 0.8 + Math.random() * 0.8;
+      coin.style.cssText = [
+        `left:${Math.random() * W}px;top:-40px;`,
+        `--coin-dur:${dur}s;`,
+        `--coin-sway:${sway}s;`,
+        `animation-delay:${Math.random() * 0.6}s;`,
+        `width:${24 + Math.random() * 16}px;height:${24 + Math.random() * 16}px;`,
+      ].join('');
+      // Symbol overlay
+      coin.textContent = SYMBOLS[Math.floor(Math.random() * SYMBOLS.length)];
+      coin.style.fontSize = '11px';
+      coin.style.display  = 'flex';
+      coin.style.alignItems = 'center';
+      coin.style.justifyContent = 'center';
+      coin.style.color  = 'rgba(146,64,14,0.7)';
+      coin.style.fontWeight = 'bold';
+      document.body.appendChild(coin);
+      setTimeout(() => coin.remove(), (dur + 0.7) * 1000);
+    }
+
+    // ── Confetti strips ───────────────────────────────────────────────────────
+    for (let i = 0; i < 12; i++) {
+      const cc    = document.createElement('div');
+      cc.className = 'champion-confetti';
+      const dur   = 2.5 + Math.random() * 2.5;
+      const color = CONFETTI_COLORS[Math.floor(Math.random() * CONFETTI_COLORS.length)];
+      const isRect = Math.random() > 0.4;
+      const w     = isRect ? (4 + Math.random() * 6) : (6 + Math.random() * 6);
+      const h     = isRect ? (10 + Math.random() * 12) : w;
+      const rot   = (Math.random() * 1080 - 540) + 'deg';
+      cc.style.cssText = [
+        `left:${Math.random() * W}px;top:-30px;`,
+        `--cc-color:${color};--cc-dur:${dur}s;`,
+        `--cc-w:${w}px;--cc-h:${h}px;`,
+        `--cc-r:${isRect ? '2px' : '50%'};`,
+        `--cc-rot:${rot};`,
+        `animation-delay:${Math.random() * 0.5}s;`,
+      ].join('');
+      document.body.appendChild(cc);
+      setTimeout(() => cc.remove(), (dur + 0.6) * 1000);
+    }
+  }
+
+  // Initial burst
+  for (let b = 0; b < 3; b++) setTimeout(spawnWave, b * 200);
+  // Keep going
+  _champInterval = setInterval(spawnWave, 700);
+}
+
+function stopChampionCelebration(): void {
+  if (_champInterval) { clearInterval(_champInterval); _champInterval = null; }
+  // Remove any lingering particles
+  document.querySelectorAll('.champion-coin,.champion-confetti').forEach(el => el.remove());
 }
 
 /** Burst confetti from pot centre when user wins */
@@ -1592,7 +1669,13 @@ function renderPlayerCards(player: Player, pos: typeof SEAT_POSITIONS[0]): HTMLE
         return wrap;
       }
 
-      const alwaysFaceUp = player.isUser || state.phase === 'showdown';
+      // Reveal all cards face-up during all-in run-out (everyone is all-in)
+      const runOutPhases = new Set(['flop', 'turn', 'river']);
+      const activePlrs   = state.players.filter(p => !p.isFolded && !p.isBusted);
+      const isAllInRunOut = runOutPhases.has(state.phase)
+        && activePlrs.length > 1
+        && activePlrs.every(p => p.isAllIn);
+      const alwaysFaceUp = player.isUser || state.phase === 'showdown' || isAllInRunOut;
       for (const card of player.holeCards) {
         const key    = cardKey(card);
         const faceUp = alwaysFaceUp || revealedCards.has(key);
@@ -1621,6 +1704,21 @@ function renderPlayerCards(player: Player, pos: typeof SEAT_POSITIONS[0]): HTMLE
   }
 
   wrap.appendChild(cardsEl);
+
+  // ── All-in run-out equity badge (shown on every player during flop/turn/river run-out) ──
+  if (allInEquities && allInEquities.has(player.id) && state.phase !== 'showdown') {
+    const pct   = Math.round((allInEquities.get(player.id)! * 100));
+    const color = pct >= 60 ? '#4ade80' : pct >= 40 ? '#fbbf24' : '#f87171';
+    const badge = document.createElement('div');
+    badge.style.cssText = [
+      `background:rgba(0,0,0,0.80);border:1px solid ${color};`,
+      'border-radius:6px;padding:2px 7px;margin-top:4px;',
+      `color:${color};font-size:11px;font-weight:700;text-align:center;`,
+      'letter-spacing:0.5px;',
+    ].join('');
+    badge.textContent = `${pct}%`;
+    wrap.appendChild(badge);
+  }
 
   // ── Pre-flop hand strength hint (user only, before any community cards) ───
   if (player.isUser && state.phase === 'preflop' && player.holeCards.length === 2 && winOdds) {
@@ -2571,6 +2669,18 @@ function render(): void {
   }
   if (!oddsPhases.has(state.phase)) { winOdds = null; lastOddsPhase = ''; }
 
+  // ── All-in run-out equities (cached per phase change) ─────────────────────
+  const runOutPhases2 = new Set(['flop', 'turn', 'river']);
+  const runOutActive  = state.players.filter(p => !p.isFolded && !p.isBusted);
+  const isRunOut      = runOutPhases2.has(state.phase)
+    && runOutActive.length > 1
+    && runOutActive.every(p => p.isAllIn);
+  if (isRunOut && state.phase !== lastAllInPhase) {
+    allInEquities  = calcAllEquities(state);
+    lastAllInPhase = state.phase;
+  }
+  if (!isRunOut) { allInEquities = null; lastAllInPhase = ''; }
+
   const app = document.getElementById('app')!;
   app.innerHTML = '';
 
@@ -2880,6 +2990,9 @@ function render(): void {
     const seated      = seatedPlayers(state).length;
     const gameOver    = seated <= 1;
     const userIsChamp = gameOver && !userBusted;
+
+    // Kick off continuous celebration when champion
+    if (userIsChamp) startChampionCelebration();
 
     const msgRow = document.createElement('div');
     msgRow.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:4px;';
@@ -3501,11 +3614,18 @@ async function doShowdown(): Promise<void> {
   postHandNotes = buildPostHandAnalysis(potBeforeAward, user, state);
 
   // ── Action log: winner entry + voice ─────────────────────────────────────
-  const winnerEntry = state.winnerIds.includes(user.id)
-    ? `You win the pot! ${fmt(potBeforeAward)}`
-    : `${state.players[state.winnerIds[0]]?.name ?? 'Unknown'} wins the pot`;
+  const isTie = state.splitPotWinnerIds.length > 1;
+  const winnerEntry = isTie
+    ? `Split pot! ${fmt(potBeforeAward)} shared`
+    : state.winnerIds.includes(user.id)
+      ? `You win the pot! ${fmt(potBeforeAward)}`
+      : `${state.players[state.winnerIds[0]]?.name ?? 'Unknown'} wins the pot`;
   handActionLog.push(winnerEntry);
-  speakText(state.winnerIds.includes(user.id) ? 'You win!' : `${state.players[state.winnerIds[0]]?.name ?? 'Unknown'} wins`);
+  if (isTie) {
+    speakText(state.splitPotWinnerIds.includes(user.id) ? "It's a tie! Split pot." : "Split pot.");
+  } else {
+    speakText(state.winnerIds.includes(user.id) ? 'You win!' : `${state.players[state.winnerIds[0]]?.name ?? 'Unknown'} wins`);
+  }
 
   // ── Save replay for this hand ─────────────────────────────────────────────
   captureSnapshot(winnerEntry);
@@ -3967,6 +4087,7 @@ function newHand(): void {
 }
 
 function newGame(): void {
+  stopChampionCelebration();
   clearSave();
   state = initGame();
   gameStarted          = false;

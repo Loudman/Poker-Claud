@@ -415,6 +415,70 @@
   animation: runoutPulse 1s ease-in-out infinite;
 }
 
+/* Champion celebration — falling 3D coins */
+@keyframes coinFall {
+  0%   { transform: translateY(-100px) rotateY(0deg) rotateX(20deg) scale(1); opacity: 1; }
+  80%  { opacity: 1; }
+  100% { transform: translateY(110vh) rotateY(900deg) rotateX(20deg) scale(0.8); opacity: 0; }
+}
+
+@keyframes coinSway {
+  0%,100% { margin-left: 0; }
+  25%      { margin-left: 24px; }
+  75%      { margin-left: -24px; }
+}
+
+.champion-coin {
+  position: fixed;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  pointer-events: none;
+  z-index: 700;
+  animation: coinFall var(--coin-dur) linear forwards, coinSway var(--coin-sway) ease-in-out infinite;
+  background: conic-gradient(
+    #fde68a 0deg, #fbbf24 45deg, #f59e0b 90deg, #fde68a 135deg,
+    #fbbf24 180deg, #f59e0b 225deg, #fde68a 270deg, #fbbf24 315deg, #fde68a 360deg
+  );
+  box-shadow: inset -4px -2px 6px rgba(0,0,0,0.35), inset 2px 2px 4px rgba(255,255,255,0.5),
+              0 2px 8px rgba(0,0,0,0.5);
+  border: 2px solid #d97706;
+  transform-style: preserve-3d;
+}
+
+.champion-coin::after {
+  content: '♣';
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  color: #92400e;
+  opacity: 0.6;
+  line-height: 30px;
+  text-align: center;
+}
+
+/* Champion confetti — larger & more colourful */
+@keyframes champConfettiFall {
+  0%   { transform: translateY(-60px) rotate(0deg) scaleX(1); opacity: 1; }
+  50%  { scaleX: -1; }
+  100% { transform: translateY(110vh) rotate(var(--cc-rot)) scaleX(-1); opacity: 0.6; }
+}
+
+.champion-confetti {
+  position: fixed;
+  width: var(--cc-w);
+  height: var(--cc-h);
+  border-radius: var(--cc-r);
+  pointer-events: none;
+  z-index: 699;
+  background: var(--cc-color);
+  animation: champConfettiFall var(--cc-dur) linear forwards;
+  opacity: 1;
+}
+
 /* Strength hint badge on user hole cards */
 .hand-strength-hint {
   font-size: 10px;

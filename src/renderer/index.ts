@@ -1026,8 +1026,42 @@ function cardToSpeech(card: Card): string {
   return `${RANK_WORDS[card.rank] ?? card.rank} of ${card.suit}`;
 }
 
+// Pre-cache available voices — getVoices() is async on many systems and returns
+// empty on first call. We populate once 'voiceschanged' fires and reuse the cache.
+const PREFERRED_VOICES = ['Samantha', 'Alex', 'Daniel', 'Karen', 'Moira',
+                          'Google US English', 'Google UK English Female',
+                          'Microsoft Zira', 'Microsoft David', 'Microsoft Mark'];
+let _cachedEnVoice: SpeechSynthesisVoice | null | undefined = undefined; // undefined = not yet resolved
+
+function resolveEnVoice(): SpeechSynthesisVoice | null {
+  if (_cachedEnVoice !== undefined) return _cachedEnVoice;
+  const voices = window.speechSynthesis?.getVoices() ?? [];
+  if (voices.length === 0) return null; // not loaded yet — will retry on next speak
+  _cachedEnVoice =
+    voices.find(v => PREFERRED_VOICES.some(n => v.name.includes(n))) ??
+    voices.find(v => v.lang === 'en-US') ??
+    voices.find(v => v.lang === 'en-GB') ??
+    voices.find(v => v.lang.startsWith('en-')) ??
+    null;
+  return _cachedEnVoice;
+}
+
+// Populate cache as soon as the browser has loaded voice list
+if (typeof window !== 'undefined' && window.speechSynthesis) {
+  window.speechSynthesis.addEventListener('voiceschanged', () => {
+    _cachedEnVoice = undefined; // reset so resolveEnVoice re-reads on next call
+    resolveEnVoice();
+  });
+}
+
 function drainSpeechQueue(): void {
   if (_speechBusy || _speechQueue.length === 0 || !voiceEnabled || masterVolume === 0) return;
+  const enVoice = resolveEnVoice();
+  if (enVoice === null && (window.speechSynthesis?.getVoices().length ?? 0) === 0) {
+    // Voices not loaded yet — wait a tick and retry
+    setTimeout(drainSpeechQueue, 200);
+    return;
+  }
   const text = _speechQueue.shift()!;
   _speechBusy = true;
   const utt = new SpeechSynthesisUtterance(text);
@@ -1035,17 +1069,6 @@ function drainSpeechQueue(): void {
   utt.rate   = 1.0;
   utt.pitch  = 1.0;
   utt.volume = Math.min(1, masterVolume);
-  // Prefer a natural-sounding English voice regardless of system language.
-  // Priority: known high-quality names → any en-US → any en-*.
-  const voices = window.speechSynthesis.getVoices();
-  const PREFERRED = ['Samantha', 'Alex', 'Daniel', 'Karen', 'Moira',
-                     'Google US English', 'Google UK English Female',
-                     'Microsoft Zira', 'Microsoft David', 'Microsoft Mark'];
-  const enVoice =
-    voices.find(v => PREFERRED.some(n => v.name.includes(n))) ??
-    voices.find(v => v.lang === 'en-US') ??
-    voices.find(v => v.lang === 'en-GB') ??
-    voices.find(v => v.lang.startsWith('en-'));
   if (enVoice) utt.voice = enVoice;
   utt.onend  = () => { _speechBusy = false; drainSpeechQueue(); };
   utt.onerror = () => { _speechBusy = false; drainSpeechQueue(); };
@@ -3143,8 +3166,17 @@ function render(): void {
     }
 
     bottomHUD.appendChild(msgRow);
+  }
 
-    if (!gameOver && !userBusted && !userIsChamp) {
+  // ── New Hand button — shown whenever showdown is over and game can continue ──
+  // Placed OUTSIDE the winnerIds>0 guard so it appears even in rare edge cases
+  // where winnerIds is empty (e.g. uncontested pot refund scenario).
+  if (state.phase === 'showdown') {
+    const _seatedNow  = seatedPlayers(state).length;
+    const _userBusted2 = state.players.find(p => p.isUser)!.chips <= 0;
+    const _gameOver2   = _seatedNow <= 1;
+    const _isChamp2    = _gameOver2 && !_userBusted2;
+    if (!_gameOver2 && !_userBusted2 && !_isChamp2) {
       const actionRow = document.createElement('div');
       actionRow.style.cssText = 'display:flex;gap:12px;';
       const newHandBtn = document.createElement('button');

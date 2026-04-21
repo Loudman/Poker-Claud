@@ -3350,17 +3350,41 @@ async function runBettingRound(): Promise<boolean> {
         });
       }
 
-      // Rabbit hunting: compute remaining community cards before applying fold
+      // Rabbit hunting: compute remaining community cards before applying fold.
+      // Must mirror the actual burn/deal pattern:
+      //   Flop  → burn 1, deal 3
+      //   Turn  → burn 1, deal 1
+      //   River → burn 1, deal 1
       if (action.type === 'fold') {
-        const remaining = 5 - state.communityCards.length;
+        const alreadyDealt = state.communityCards.length; // 0, 3, or 4
+        const remaining = 5 - alreadyDealt;
         if (remaining > 0) {
           const deckCopy = [...state.deck];
           const rCards: Card[] = [];
-          for (let i = 0; i < remaining && deckCopy.length > 0; i++) {
-            deckCopy.shift(); // burn card
-            const c = deckCopy.shift();
-            if (c) rCards.push(c);
+
+          // Helper: burn one, then deal `n` cards
+          const burnAndDeal = (n: number) => {
+            deckCopy.shift(); // burn
+            for (let i = 0; i < n && deckCopy.length > 0; i++) {
+              const c = deckCopy.shift();
+              if (c) rCards.push(c);
+            }
+          };
+
+          if (alreadyDealt === 0) {
+            // Preflop fold: need flop (burn+3), turn (burn+1), river (burn+1)
+            burnAndDeal(3); // flop
+            burnAndDeal(1); // turn
+            burnAndDeal(1); // river
+          } else if (alreadyDealt === 3) {
+            // Post-flop fold: need turn (burn+1), river (burn+1)
+            burnAndDeal(1); // turn
+            burnAndDeal(1); // river
+          } else {
+            // Post-turn fold: need river (burn+1)
+            burnAndDeal(1); // river
           }
+
           rabbitCards = rCards;
           // Auto-show rabbit cards briefly after fold
           if (rCards.length > 0) {

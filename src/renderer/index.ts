@@ -3556,10 +3556,29 @@ async function doShowdown(): Promise<void> {
     newlyBusted.forEach(p => recentlyBustedIds.delete(p.id));
   }
 
+  // ── Defensive guard: winnerIds may be empty in very rare edge cases ───────
+  // (e.g. all-in from antes with no handContribution tracked — now fixed, but
+  //  kept as belt-and-suspenders so the game never freezes silently)
+  const user = state.players.find(p => p.isUser)!;
+  if (state.winnerIds.length === 0) {
+    // Fall back to the player with the best hand among active non-folded players
+    const active = state.players.filter(p => !p.isFolded && !p.isBusted && p.holeCards.length >= 2);
+    if (active.length > 0) {
+      let bestScore = -1;
+      for (const p of active) {
+        if ((p.handResult?.score ?? -1) > bestScore) bestScore = p.handResult!.score;
+      }
+      const fallbackWinner = active.find(p => p.handResult?.score === bestScore) ?? active[0];
+      state = { ...state, winnerIds: [fallbackWinner.id] };
+    } else {
+      // Absolute last resort: give pot to user to avoid frozen state
+      state = { ...state, winnerIds: [user.id] };
+    }
+  }
+
   // Record hand history
-  const winner   = state.players[state.winnerIds[0]];
+  const winner   = state.players.find(p => p.id === state.winnerIds[0]) ?? user;
   const handDesc = winner.handResult?.description ?? '';
-  const user     = state.players.find(p => p.isUser)!;
   handHistory.push({
     handNum:      state.handNumber,
     winnerName:   winner.name,
@@ -4000,6 +4019,33 @@ async function playHand(): Promise<void> {
     return;
   }
 
+  // Wrap entire hand in try-catch so any unexpected error produces a renderable
+  // showdown state rather than silently freezing the game.
+  try {
+    await _playHandInner();
+  } catch (err) {
+    console.error('[playHand] Unexpected error:', err);
+    // Force showdown phase so the "New Hand" button will appear
+    if (state.phase !== 'showdown' && state.phase !== 'idle') {
+      // Try to salvage by going to endByFold path
+      const active = activePlayers(state);
+      if (active.length >= 1) {
+        const fallback = active.find(p => p.isUser) ?? active[0];
+        state = { ...state, winnerIds: [fallback.id], phase: 'showdown' };
+        state = awardPot(state);
+      } else {
+        state = { ...state, phase: 'showdown' };
+      }
+    }
+    dealingInProgress = false;
+    isUserTurn = false;
+    userActionResolve = null;
+    stopTimeBank();
+    render();
+  }
+}
+
+async function _playHandInner(): Promise<void> {
   gameStarted = true;
   equityHistory = [];
   rabbitCards   = [];

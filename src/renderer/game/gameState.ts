@@ -315,9 +315,10 @@ export function initHand(state: GameState): GameState {
     for (const p of players) {
       if (!p.isBusted) {
         const paid = Math.min(anteAmount, p.chips);
-        p.chips   -= paid;
-        p.roundBet += paid; // roundBet will be reset after blinds are posted, use pot directly
-        pot       += paid;
+        p.chips            -= paid;
+        p.roundBet         += paid; // roundBet will be reset after blinds are posted, use pot directly
+        p.handContribution += paid; // track ante in handContribution so buildSidePots includes this player
+        pot                += paid;
         if (p.chips === 0) p.isAllIn = true;
       }
     }

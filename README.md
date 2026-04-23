@@ -9,12 +9,12 @@ A fully-featured Texas Hold'em poker simulator built with **Electron**, **TypeSc
 ## Screenshots
 
 ### Gameplay — Action Panel
-![Gameplay screenshot showing action panel with pot odds, equity display, and betting controls](screenshots/gameplay.png)
+![Gameplay screenshot showing action panel with pot odds, equity display, and betting controls](screenshots/poker-teacher.png)
 
 *Pre-flop action with A♣ Q♦. The bottom HUD shows pot odds (need 17%, you have 47% ✓), quick bet-size presets, and the 30-second time bank. Player badges show VPIP/PFR stats and position labels. The chip-leader crown (👑) marks the current stack leader.*
 
 ### Post-Hand — Poker Teacher Panel
-![Post-hand analysis showing the Poker Teacher panel with a "Good fold" note](screenshots/poker-teacher.png)
+![Post-hand analysis showing the Poker Teacher panel with a "Good fold" note](screenshots/gameplay.png)
 
 *After folding on the flop, the 🎓 Poker Teacher panel appears above the "New Hand" button. It confirms the fold was correct (+EV), shows the user's hole cards in the header, and explains the reasoning. The community cards and winner announcement remain visible.*
 
